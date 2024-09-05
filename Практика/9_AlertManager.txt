@@ -1,0 +1,142 @@
+Шаг 1: Создание правил оповещения в Prometheus
+Чтобы события отображались в правильное время, на сервере нужно настроить NTP. Для этого установим chrony. Сделать это можно, выполнив команды:
+sudo apt-get install chrony -y
+sudo systemctl enable chrony
+sudo systemctl start chrony
+
+
+далее нам нужно создать отдельный конфиг для Прометея, в /etc/prometheus
+создадим файл rules.yml
+Первым правилом будет отслеживание состояния самого Прометея
+Я уверен, что все согласятся, что очень важно знать, когда какой-либо из ваших экземпляров не работает . Поэтому я собираюсь использовать это в качестве нашего условия, используя метрику up . Оценивая эту метрику в пользовательском интерфейсе Prometheus (http://localhost:9090), вы увидите, что все запущенные экземпляры имеют значение 1, в то время как все экземпляры, которые в данный момент не запущены, имеют значение 0 (в данный момент мы запускаем только наш экземпляр Prometheus).
+
+После того, как вы определились с условием оповещения, вам необходимо указать их в rules.yml. Его содержимое будет следующим:
+
+groups:
+- name: AllInstances
+  rules:
+  - alert: InstanceDown
+    # Condition for alerting
+    expr: up == 0
+    for: 1m
+    # Annotation - additional informational labels to store more information
+    annotations:
+      title: 'Instance {{ $labels.instance }} down'
+      description: '{{ $labels.instance }} of job {{ $labels.job }} has been down for more than 1 minute.'
+    # Labels - additional labels to be attached to the alert
+    labels:
+      severity: 'critical'
+
+
+
+Подводя итог, он говорит, что если какой-либо из экземпляров будет отключен (включен == 0) в течение одной минуты, то сработает оповещение. Я также включил аннотации и метки, которые хранят дополнительную информацию об оповещениях. Для этого вы можете использовать шаблонные переменные , такие как {{ $labels.instance }} , которые затем интерполируются в конкретные экземпляры (например, localhost:9100).
+
+Затем нужно проверить созданные правила, для этого выполните команду:
+
+promtool check rules /etc/prometheus/rules.yml
+
+После того, как rules.yml будет готов, вам нужно связать файл с prometheus.yml и добавить конфигурацию оповещения. Ваш prometheus.yml будет выглядеть следующим образом:
+
+rule_files:
+  - rules.yml
+alerting:
+  alertmanagers:
+    - static_configs:
+      - targets:
+        # Alertmanager's default port is 9093
+        - localhost:9093
+
+
+Шаг 2: Настройка Alertmanager
+Дальше распакуйте полученный архив:
+
+tar -xvf alertmanager-0.21.0.linux-amd64.tar.gz
+
+И скопируйте файлы alertmanager и amtool в папку /usr/local/bin:
+
+sudo cp alertmanager-0.21.0.linux-amd64/alertmanager /usr/local/bin/
+
+sudo cp alertmanager-0.21.0.linux-amd64/amtool /usr/local/bin/
+
+Далее надо скопировать конфигурационный файл alertmanager.yml в /etc/prometheus:
+
+sudo cp alertmanager-0.21.0.linux-amd64/alertmanager.yml /etc/prometheus
+
+Дайте пользователю prometheus права на конфигурационный файл:
+
+sudo chown -R prometheus:prometheus /etc/prometheus/alertmanager.yml
+
+sudo systemctl edit --full --force prometheus-alertmanager
+
+[Unit]
+Description=Alertmanager Service
+After=network.target
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/alertmanager \
+--config.file=/etc/prometheus/alertmanager.yml \
+--storage.path=/etc/Prometheus/alertmanager \
+--cluster.advertise-address=10.0.2.2:9093
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+[Install]
+WantedBy=multi-user.target
+
+sudo systemctl start prometheus-alertmanager
+
+откройте localhost:9093.
+
+
+В зависимости от того, есть ли у вас активные оповещения, Alertmanager должен быть правильно настроен и выглядеть примерно так, как на изображении ниже. Чтобы увидеть аннотации, которые вы добавили на предыдущем шаге, нажмите кнопку +Info .
+
+4. Настройка Alertmanager
+Почти всё готово, теперь надо настроить сам Alertmanager. Надо указать как группировать алерты, когда и куда отправлять уведомления. Вот основное содержание конфигурационного файла:
+
+global:
+route:
+  group_by: ['по каким параметрам группировать правила']
+  group_wait: время_ожидания_перед_отправкой_уведомления_для_группы
+  group_interval: время_отправки_повторного_сообщения_для_группы
+  repeat_interval: время_до_отправки_повторного_сообщения
+  receiver: 'имя_способа_отправки_сообщений'
+receivers:
+  - name: 'имя_способа_отправки_сообщений'
+    конфигурация
+Все алерты, поступившие в AlertManager необходимо группировать чтобы не отправлять информацию об одних и тех же событиях несколько раз. Директива group_by указывает какие поля использовать во время группировки. После того, как была создана новая группа алертов, к делу подключается параметр group_wait. Он указывает сколько надо ждать перед отправкой первого сообщения. Параметр отвечает за то, чтобы вы могли получить одним сообщением всю пачку алертов группы, а не отдельное сообщение для каждого алерта.
+
+Параметр group_interval указывает сколько надо ждать после отправки первого сообщения для группы, до отправки повторных сообщений из этой же группы. Но не только он влияет на интервал между сообщениями, ещё есть параметр repeat_interval - который указывает через сколько времени можно повторить отправку уже отправленного алерта.
+
+Вот рабочий пример конфигурации с отправкой уведомлений на email:
+
+sudo vi /etc/prometheus/alertmanager.yml
+
+global:
+route:
+  group_by: ['alertname']
+  group_wait: 30s
+  group_interval: 10m
+  repeat_interval: 60m
+  receiver: 'email'
+receivers:
+- name: 'email'
+  email_configs:
+  - to: 'адрес_электронной_почты_получателя'
+    from: 'адрес_электронной_почты_отправителя'
+    smarthost: 'SMTP_хост:порт'
+    auth_username: 'имя_пользователя'
+    auth_identity: 'имя_пользователя'
+    auth_password: 'пароль'
+Все алерты группируются по имени, а значит если для двух разных серверов придут алерты с одинаковым именем, они будут помещены в одну группу. Группа собирается на протяжении 30 секунд, и отправлять повторные сообщения можно не чаще чем раз в час. Дальше идёт настройка отправки сообщений на электронную почту. Для этого используется протокол SMTP. Необходимо указать хост SMTP сервера, имя пользователя и пароль. Вы можете использовать свой SMTP сервер, настроенный на Postfix или Exim или же воспользоваться сторонним сервисом.
+
+Дальше нужно только перезапустить Alertmanager:
+
+sudo systemctl restart prometheus-alertmanager
+
+5. Тестирование
+Для тестирования на одном из серверов, с которых собирает данные Prometheus можно отключить node_exporter. Для этого выполните:
+
+sudo systemctl stop prometheus-node-exporter
+
+Подождите пока Prometheus снова опросит цели и в AlertManager появится этот алерт

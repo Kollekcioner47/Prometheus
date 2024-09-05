@@ -1,0 +1,18 @@
+sudo apt-get install -y adduser libfontconfig1
+wget https://dl.grafana.com/enterprise/release/grafana-enterprise_9.1.4_amd64.deb
+sudo dpkg -i grafana-enterprise_9.1.4_amd64.deb
+
+sudo /bin/systemctl deamon-reload
+sudo /bin/systemctl enable grafana-server
+sudo systemctl start grafana-server
+
+По умолчанию Grafana доступна на порту 3000. Логин и пароль при первом входе: admin и admin соответственно.
+Когда войдете в интерфейс программы, откройте Configuration -> Data Sources и нажмите кнопку Add Data Source:
+В открывшемся окне выберите тип Data Source - Prometheus:
+На шаге настройки подключения необходимо в поле URL ввести адрес сервера, на котором доступен Prometheus и его порт. Если Grafana находится на той же машине, что и Prometheus можно использовать localhost, а порт по умолчанию 9090:
+
+Доску для метрик, собираемых по умолчанию сервером Prometheus можно взять https://grafana.com/grafana/dashboards/3662
+На этой странице вам нужен только идентификатор 3362, который находится под надписью Get this dashboard:
+Эта доска специально разработана для экспортера Prometheus и отображает с него данные. Для её добавления в интерфейсе Grafana откройте Dashboards -> Manage -> Import и введите идентификатор доски
+Затем нажмите кнопку Load и на следующей странице введите имя доски и выберите ранее созданный источник данных (Data source)
+После нажатия на кнопку Import перед вами откроется доска с метриками

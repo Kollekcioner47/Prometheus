@@ -1,0 +1,20 @@
+Пропишем в Prometheus.yml наш Windows Server:
+
+- job_name: "Windows_servers"
+  static_configs:
+    - targets:
+        - 10.0.2.8:9182
+
+перезапускаем сервис и смотри на портале в tarets, появился ли там наш Windows Server
+sudo systemctl restart prometheus
+
+нам необходимо скачать дистрибутив экспортёра:
+https://github.com/prometheus-community/windows_exporter
+
+И, затем, установить его
+
+смотрим на портале в tarets, появился ли там наш PostgreSQL
+http://localhost:9090
+
+Переходим в графану и настравиваем понравившися дашбоард, например 20763
+http://localhost:3000

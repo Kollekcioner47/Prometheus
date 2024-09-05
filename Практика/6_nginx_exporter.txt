@@ -1,0 +1,93 @@
+На WebServer скачиваем последнюю версию экспортера:
+https://github.com/nginxinc/nginx-prometheus-exporter/
+
+Распаковываем архив:
+tar xzf nginx-prometheus-exporter_1.3.0_linux_amd64.tar.gz
+
+Создаём пользователя для сервиса:
+sudo useradd --system --no-create-home --shell /bin/false nginx-exporter
+
+копируем экспортер в bin
+sudo cp nginx-prometheus-exporter /usr/local/bin
+
+Настройка NGINX
+Для получения статистики и метрик от nginx, необходимо настроить встроенную страницу server-status. Находим незанятый порт на сервере, например:
+
+ss -tunlp | grep :8080
+
+* данной командой мы увидим, занят ли порт 8081.
+
+Если система возвращает пустую строку, значит порт свободен и мы будем использовать его. Если порт занят, пробуем поискать другие незанятые порты. Дальне по инструкции предполагается, что мы настраиваем 8080.
+
+Создаем конфигурационный файл nginx:
+
+sudo nano /etc/nginx/conf.d/stats.conf
+
+server {
+    listen 8081;
+    server_name _;
+    access_log off;
+    location /server-status {
+        stub_status on;
+    }
+}
+
+Проверяем конфигурацию и применяем ее:
+
+sudo nginx -t && nginx -s reload
+
+Должна заработает страница статистики. Можно проверить ее работоспособность командой:
+
+curl http://127.0.0.1:8081/server-status
+
+Мы можем увидеть что-то на подобие:
+
+Active connections: 320 
+server accepts handled requests
+ 498121 498121 15945169 
+Reading: 0 Writing: 1 Waiting: 319 
+
+Переходим к запуску экспортера.
+
+создаём файл сервиса:
+sudo systemctl edit --full --force nginx_exporter.service
+
+[Unit]
+Description=Node Exporter Service
+After=network.target
+
+[Service]
+User=nginx_exporter
+Group=nginx_exporter
+Type=simple
+ExecStart=/usr/local/bin/nginx-prometheus-exporter -nginx.scrape-uri=http://127.0.0.1:8081/server-status
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+
+Перечитываем конфиг:
+sudo systemctl start nginx_exporter.service
+sudo systemctl enable nginx_exporter.service
+sudo systemctl status nginx_exporter.service
+
+переходим на сервер Prometheus и дополняем Prometheus.yml
+
+scrape_configs:
+.......
+  - job_name: 'nginx_exporter'
+    scrape_interval: 15s
+    static_configs:
+      - targets: 
+	  - 10.0.2.3:9113
+
+перезапускаем сервис и смотрим на портале в tarets, появился ли там наш Nginx
+sudo systemctl restart prometheus
+
+http://localhost:9090
+
+Переходим в графану и настравиваем понравившися дашбоард, например 14900
+http://localhost:3000
+
+

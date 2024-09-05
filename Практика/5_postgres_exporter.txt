@@ -1,0 +1,61 @@
+Сначала необходимо установить сам экспортер, для этого нужно зайти на страницу проекта:
+https://github.com/prometheus-community/postgres_exporter/releases/tag/v0.15.0
+#Может быть более новая версия 
+
+И скачиваем свежий релиз на сервер PostgreSQL:
+
+
+Далее нам непобедимо распаковать полученный архив:
+tar -xf postgres_exporter-0.15.0.linux-amd64.tar.gz
+
+Копируем содержимое папки в bin:
+sudo cp postgres_exporter-0.15.0.linux-amd64/postgres_exporter /usr/local/bin/
+
+назначаем владельцем файла postgres:
+sudo chown -R postgres:postgres /usr/local/bin/postgres_exporter
+
+Создаём сервис:
+sudo systemctl edit --full --force postgres_exporter.service
+
+[Unit]
+Description=Prometheus PostgreSQL Exporter
+Wants=network-online.target
+After=network.target
+
+[Service]
+Type=simple
+Restart=always
+User=postgres
+Group=postgres
+Environment=DATA_SOURCE_NAME="user=postgres host=/var/run/postgresql/ sslmode=disable"
+ExecStart=/usr/local/bin/postgres_exporter
+[Install]
+WantedBy=multi-user.target
+
+Перечитываем конфиг:
+sudo systemctl start postgres_exporter.service
+sudo systemctl enable postgres_exporter.service
+sudo systemctl status postgres_exporter.service
+
+
+переходим на сервер Prometheus и дополняем Prometheus.yml
+
+scrape_configs:
+.......
+  - job_name: 'postgres_exporter'
+    scrape_interval: 15s
+    static_configs:
+      - targets: 
+	  - 10.0.2.4:9187
+
+перезапускаем сервис и смотрим на портале в tarets, появился ли там наш PostgreSQL
+sudo systemctl restart prometheus
+
+http://localhost:9090
+
+Переходим в графану и настравиваем понравившися дашбоард, например 9628
+http://localhost:3000
+
+Переходим на DBServer и запускаем тестовую нагрузку:
+pgbench -i demo
+pgbench -T 1000
