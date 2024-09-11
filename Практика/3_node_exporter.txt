@@ -65,13 +65,13 @@ nano node_exporters.yaml
   - name: create distrib directory
     shell: mkdir /home/engineer/distrib_ne
   - name: copy exporter to distrib
-    copy: src=/home/engineer/distrib/node_exporter-1.8.2.linux-amd64 dist=/home/engineer/distrib_ne mode=0755
+    copy: src=/home/engineer/distrib/node_exporter-1.8.2.linux-amd64 dest=/home/engineer/distrib_ne mode=0755
   - name: copy node exporter to bin
-    copy: src=/home/engineer/distrib_ne/node_exporter-1.8.2.linux-amd64/node_exporter dist=/usr/local/bin mode=0755
+    copy: src=/home/engineer/distrib_ne/node_exporter-1.8.2.linux-amd64/node_exporter dest=/usr/local/bin mode=0755
   - name: create node exporter user
     shell: useradd --no-create-home --shell /bin/false node_exporter 
   - name: copy service file to systemd
-    copy: src=/etc/system/system/node_exporter.service dist=/etc/systemd/system/node_exporter.service mode=0755
+    copy: src=/etc/system/system/node_exporter.service dest=/etc/systemd/system/node_exporter.service mode=0755
   - name: restart daemon
     shell: /bin/systemctl daemon-reload
   - name: start service
