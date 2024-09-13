@@ -1,0 +1,145 @@
+#Prometheus
+#Нет задач у прометея
+- alert: JobMissing
+	expr: absent(up{job="prometheus"})
+	#expr: absent(up{job="$job"})
+	for: 0m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Прометей потерял джоб {{ $job }}'
+		description: 'Prometheus job is \n VALUE={{ $value }}\n LABELS = {{ $labels }}'
+		
+#Прогрев Прометея
+- alert: PrometheusWarmup
+	expr: sum by (instance, job) ((up == 0) * on (instance) group_right(job)   (node_time_seconds - node_boot_time_seconds > 600))
+	for: 0m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Прометей потерял джоб из-за прогрева(instance{{ $labels.instance }})'
+		description: 'Allow a job up in 10 min\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+		
+#Конфиг Прометея не прочитался
+- alert: PrometheusConfigError
+	expr: prometheus_config_list_reload_successful != 1
+	for: 0m
+	labels:
+		severity: critical
+	annotations:
+		title: 'Прометей не смог прочитать конфиг (instance{{ $labels.instance }})'
+		description: 'Prometheus reload error\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+		
+#Конфиг АлертМанагера не прочитался
+- alert: AlertManagerConfigError
+	expr: alertmanager_config_list_reload_successful != 1
+	for: 0m
+	labels:
+		severity: critical
+	annotations:
+		title: 'АлертМанагер не смог прочитать конфиг (instance{{ $labels.instance }})'
+		description: 'AlertManager reload error\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+		
+#АлертМанагер не подключился к Прометею
+- alert: AlertManagerConnectionError
+	expr: prometheus_notification_alertmanagers_discovered<1
+	for: 0m
+	labels:
+		severity: critical
+	annotations:
+		title: 'АлертМанагер не смог подключиться к Прометею (instance{{ $labels.instance }})'
+		description: 'AlertManager connection error\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+
+#Скрейп дублёр
+- alert: PrometheusScrapeDuplication
+	expr: increase(prometheus_target_scrapes_simple_duplicate_timestamp_total[5m])>0
+	for: 0m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Дублирование заданий (instance{{ $labels.instance }})'
+		description: 'Scrape Duplicate\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+
+#NodeExporter
+#Мало памяти Меньше 30% в течение 2 минут
+- alert: HostOutMemory
+	expr: (node_memory_MemAvailable_bytes/node_memory_MemTotal_bytes*100 <30) *on(instance) group_left(node_name) node_uname_info{nodename=~".+"}
+	for: 2m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Мало ПАМЯТИ!!! (instance{{ $labels.instance }})'
+		description: 'Node memory is filling\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+		
+#Слишком большой трафик, больше 100 МБ\сек
+- alert: HostNetworkThroughOut
+	expr: (sum by (instance) (irate(node_network_transmit_bytes_total[5m]))/1024/1024>100)*(instance) group_left (nodename) node_uname_info{nodename=~".+"}
+	for: 10m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Слишком большой трафик на хост!!! (instance{{ $labels.instance }})'
+		description: 'Network activity is abnormal\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+
+#Диск почти заполнен, менее 10% свободно
+- alert: HostOutofDiskSpace
+	expr: ((node_filesystem_avail_bytes*100)/node_filesystem_size_bytes <10 and on(instance, device, mountpoint) node_filesystem_readonly == 0) * (instance) group_left (nodename) node_uname_info{nodename=~".+"}
+	for: 5m
+	labels:
+		severity: critical
+	annotations:
+		title: 'Диск почти заполнен, менее 10% свободно!!! (instance{{ $labels.instance }})'
+		description: 'Disk is almost space\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+
+#Диск заполнится полносью, менее чем за 24 часа
+- alert: HostOutofDiskSpace
+	expr: ((node_filesystem_avail_bytes*100)/node_filesystem_size_bytes <10 and on(instance, device, mountpoint) predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs"}[1h],24*3600) < 0 and on (instance, device, mountpoint) node_filesystem_readonly == 0) * (instance) group_left (nodename) node_uname_info{nodename=~".+"} 
+	for: 10m
+	labels:
+		severity: critical
+	annotations:
+		title: 'Диск почти заполнен, через 24 часа закончится место!!! (instance{{ $labels.instance }})'
+		description: 'Disk is almost space\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+#Kafka
+#kafka topic decrease offset
+- alert: KafkaDecrTopic
+	expr: delta(kafka_borrow_partition_current_offset[1m])<0
+	for: 0m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Kafka topic decrease (instance{{ $labels.instance }})'
+		description: 'Kafka topic decrease\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+
+#kafka consumer lag
+- alert: KafkaConsLag
+	expr: kafka_borrow_topic_partition_offset - on(partition,cluster,topic) group_right() kafka_borrow_partition_current_offset>=(kafka_borrow_topic_partition_offset offset 1m - on(partition,cluster,topic) group_right() kafka_borrow_topic_partition_offset offset 1m ) and kafka_borrow_topic_partition_offset - on(partition,cluster,topic) group_right()  kafka_borrow_topic_partition_offset>0
+	for: 2m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Kafka consumer lag (instance{{ $labels.instance }})'
+		description: 'Kafka lag over 1 minute and increase\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+
+#kafka слишком много клиентов
+- alert: KafkaConsumerGroupUp
+	expr: sum(consumer_group_lag) by (consumergroup) > 50
+	for: 1m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Kafka Consumer Group Up (instance{{ $labels.instance }})'
+		description: 'Kafka many consumer\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+		
+#Patroni
+#Нет лидера
+- alert: PatroniNoLeader
+	expr: (max by (scope) (patroni_master) <1) and (max by (scope) (patroni_standby_leader) <1)
+	for: 1m
+	labels:
+		severity: warning
+	annotations:
+		title: 'Поеряли Лидера Патрони!(instance{{ $labels.instance }})'
+		description: 'Leader Patroni is out\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
+
+#PostgreSQL
