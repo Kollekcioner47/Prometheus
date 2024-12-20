@@ -143,3 +143,30 @@
 		description: 'Leader Patroni is out\n VALUE = {{ $value }}\n LABELS = {{ $labels }}'
 
 #PostgreSQL
+#Слишком много подключенийexpr: sum by (instance, job, server)(pg_stat_activity_count) > min by (instance, job, server) (pg_settings_max_connection * 0.8)
+for: 10m
+#Слишком много мёртвых строк, нужен vacuumexpr: ((pg_stat_user_tables_n_dead_tup > 10000) / (pg_stat_user_tables_n_live_tup + pg_stat_user_tables_n_dead_tup)) > 0.1
+for: 10m
+#Раздувание индекса, нужно перестроить
+expr: pg_bloat_btree_bloat_pct > 50 and on(idxname)for: 1h
+annotations:
+description: "Индекс {{ $labels.idxname }} раздут, тебе нужно его перестроить, выполни 'reindex index concurrently {{ $labels.idxname }};' \n VALUE = {{ $value }} \n LABELS = {{  $labels }}"
+#Раздувание таблицы, нужно перестроить
+expr: pg_bloat_table_bloat_pct > 70 and on(relname)for: 1h
+annotations:
+description: Таблица {{ $labels.relname }} раздута, тебе нужно её перестроить, выполни 'vacuum {{ $labels.relname }};' \n VALUE = {{ $value }} \n LABELS = {{  $labels }}"
+
+#Мало места на Windows
+expr: 100.0 - 100((windows_logical_disk_free_bytes / 1024 / 1024) / (windows_logical_disk_free_bytes / 1024 / 1024)) > 85
+for: 10m
+description: "Слишком мало места на {{ $labels.windows_os_info }}"
+
+#Мало памяти на Windows
+expr: 100.0 - 100((windows_os_physical_free_bytes) / (windows_cs_physical_memory_bytes)* 100) > 70
+for: 10m
+description: "Слишком мало памяти на {{ $labels.windows_os_info }}"
+
+#Высокая утилизация процессора на Windows
+expr: 100 - (avg by (instance) (rate(windows_cpu_time_total{mode="idle"}[5m])) * 100) > 90
+for: 0m
+description: "Слишком нагружен процессор на {{ $labels.windows_os_info }}"
