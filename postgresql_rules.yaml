@@ -1,0 +1,119 @@
+groups:
+- name: PostgreSQL Alerts
+  rules:
+
+  # Доступность
+  - alert: PostgresqlDown
+    expr: pg_up == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "PostgreSQL недоступен (инстанс {{ $labels.instance }})"
+      description: "Инстанс PostgreSQL не отвечает и считается недоступным."
+
+  - alert: PostgresqlTooManyConnections
+    expr: pg_stat_activity_count > (pg_settings_max_connections * 0.8)
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Слишком много подключений (инстанс {{ $labels.instance }})"
+      description: "Количество подключений к базе данных превысило 80% от параметра max_connections."
+
+  # Производительность
+  - alert: PostgresqlHighCpuUsage
+    expr: rate(process_cpu_seconds_total{job="postgres"}[5m]) * 100 > 80
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Высокая загрузка CPU (инстанс {{ $labels.instance }})"
+      description: "Загрузка CPU PostgreSQL превышает 80% на протяжении 5 минут."
+
+  - alert: PostgresqlHighMemoryUsage
+    expr: process_resident_memory_bytes / machine_memory_bytes > 0.8
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Высокое использование памяти (инстанс {{ $labels.instance }})"
+      description: "Использование памяти PostgreSQL превысило 80% в течение 5 минут."
+
+  # Репликация
+  - alert: PostgresqlReplicationLag
+    expr: pg_replication_lag > 30
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Большая задержка репликации (инстанс {{ $labels.instance }})"
+      description: "Задержка репликации превышает 30 секунд."
+
+  - alert: PostgresqlReplicationDown
+    expr: pg_replication_is_replica == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Репликация не работает (инстанс {{ $labels.instance }})"
+      description: "PostgreSQL репликация остановлена или не активна."
+
+  # Диск
+  - alert: PostgresqlLowDiskSpace
+    expr: pg_database_size_bytes / pg_database_size_max_bytes > 0.9
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Заканчивается место на диске (инстанс {{ $labels.instance }})"
+      description: "Использовано более 90% дискового пространства под базу данных."
+
+  # Медленные запросы
+  - alert: PostgresqlSlowQueries
+    expr: rate(pg_stat_statements_total_time_seconds[5m]) > 0.1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Медленные запросы (инстанс {{ $labels.instance }})"
+      description: "Среднее время выполнения запросов слишком высокое."
+
+  - alert: PostgresqlDeadlocks
+    expr: increase(pg_stat_database_deadlocks[5m]) > 5
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Много взаимоблокировок (инстанс {{ $labels.instance }})"
+      description: "Зафиксировано более 5 взаимоблокировок за 5 минут."
+
+  # Пул подключений
+  - alert: PostgresqlConnectionPoolExhausted
+    expr: pg_pool_max_waiters > 10
+    for: 2m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Пул подключений исчерпан (инстанс {{ $labels.instance }})"
+      description: "Много клиентов ожидают свободного подключения к базе данных."
+
+  # Бэкапы
+  - alert: PostgresqlBackupFailed
+    expr: pg_backup_last_status != 1
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Ошибка резервного копирования (инстанс {{ $labels.instance }})"
+      description: "Последний бэкап базы данных завершился с ошибкой."
+
+  # WAL
+  - alert: PostgresqlWalFilesGrowing
+    expr: increase(pg_wal_files[1h]) > 100
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Слишком быстрый рост WAL файлов (инстанс {{ $labels.instance }})"
+      description: "Количество WAL файлов увеличивается слишком быстро. Проверьте репликацию и архивирование."
