@@ -1,0 +1,70 @@
+1. Экспортер недоступен
+- alert: ClickHouseExporterDown
+  expr: up{job="clickhouse"} == 0
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "ClickHouse exporter не отвечает ({{ $labels.instance }})"
+    description: "Экспортер метрик ClickHouse недоступен более 5 минут."
+
+2. Нода ClickHouse недоступна
+- alert: ClickHouseDown
+  expr: clickhouse_up == 0
+  for: 2m
+  labels:
+    severity: critical
+  annotations:
+    summary: "ClickHouse не отвечает ({{ $labels.instance }})"
+    description: "ClickHouse instance {{ $labels.instance }} не доступен."
+
+3. Ошибки запросов (например, OOM или runtime errors)
+- alert: ClickHouseQueryErrors
+  expr: increase(clickhouse_query_failures_total[5m]) > 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Ошибки запросов ClickHouse ({{ $labels.instance }})"
+    description: "Есть неудачные запросы за последние 5 минут."
+
+
+4. Долгие запросы
+- alert: ClickHouseSlowQueries
+  expr: rate(clickhouse_query_duration_seconds_sum[5m]) / rate(clickhouse_query_duration_seconds_count[5m]) > 5
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Медленные запросы в ClickHouse ({{ $labels.instance }})"
+    description: "Среднее время выполнения запросов > 5 секунд за последние 10 минут."
+
+5. Переполнение места на диске (хранение данных ClickHouse)
+- alert: ClickHouseDiskSpaceLow
+  expr: (clickhouse_free_space_bytes / clickhouse_total_space_bytes) < 0.1
+  for: 15m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Недостаточно места на диске ClickHouse ({{ $labels.instance }})"
+    description: "Свободно < 10% дискового пространства."
+
+6. Репликация отстала
+- alert: ClickHouseReplicationLag
+  expr: max(clickhouse_replica_queue_size) by (instance, table) > 100
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Репликация ClickHouse отстаёт ({{ $labels.table }})"
+    description: "Очередь репликации > 100 записей для {{ $labels.table }}."
+
+7. Слишком много активных запросов
+- alert: ClickHouseTooManyQueries
+  expr: clickhouse_queries > 500
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Перегрузка ClickHouse ({{ $labels.instance }})"
+    description: "Активных запросов > 500."
