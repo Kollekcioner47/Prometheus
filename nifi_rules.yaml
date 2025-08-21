@@ -1,0 +1,116 @@
+groups:
+- name: NiFi Alerts
+  rules:
+  
+  # Алерты доступности
+  - alert: NiFiNodeDown
+    expr: up{job="nifi"} == 0
+    for: 1m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Узел NiFi недоступен (instance {{ $labels.instance }})"
+      description: "Узел NiFi недоступен более 1 минуты"
+
+  - alert: NiFiClusterCoordinatorDown
+    expr: nifi_cluster_coordinator_health != 1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Координатор кластера NiFi недоступен (instance {{ $labels.instance }})"
+      description: "Координатор кластера работает с ошибками более 2 минут"
+
+  # Алерты производительности
+  - alert: NiFiHighHeapUsage
+    expr: nifi_jvm_memory_used{area="heap"} / nifi_jvm_memory_max{area="heap"} > 0.9
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Высокое использование кучи JVM на {{ $labels.instance }}"
+      description: "Использование памяти JVM превышает 90% в течение 5 минут"
+
+  - alert: NiFiHighThreadUtilization
+    expr: nifi_threads_active / nifi_threads_total > 0.9
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Высокая загрузка потоков на {{ $labels.instance }}"
+      description: "Загрузка потоков превышает 90% в течение 5 минут"
+
+  # Алерты очередей
+  - alert: NiFiLargeFlowFileQueue
+    expr: nifi_queue_size > 10000
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Большая очередь FlowFile на {{ $labels.instance }}"
+      description: "Размер очереди FlowFile превышает 10 000 в течение 10 минут"
+
+  - alert: NiFiQueueStuck
+    expr: increase(nifi_queue_data_size[5m]) == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Очередь застопорилась на {{ $labels.instance }}"
+      description: "Данные в очереди не перемещаются более 5 минут"
+
+  # Алерты репозитория
+  - alert: NiFiLowContentRepositorySpace
+    expr: nifi_content_repository_free_space / nifi_content_repository_total_space < 0.2
+    labels:
+      severity: critical
+    annotations:
+      summary: "Мало свободного места в Content Repository на {{ $labels.instance }}"
+      description: "Свободного места в Content Repository менее 20%"
+
+  - alert: NiFiLowFlowFileRepositorySpace
+    expr: nifi_flowfile_repository_free_space / nifi_flowfile_repository_total_space < 0.2
+    labels:
+      severity: critical
+    annotations:
+      summary: "Мало свободного места в FlowFile Repository на {{ $labels.instance }}"
+      description: "Свободного места в FlowFile Repository менее 20%"
+
+  # Алерты процессоров
+  - alert: NiFiProcessorFailed
+    expr: nifi_processor_status{status="failed"} == 1
+    for: 2m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Процессор вышел из строя на {{ $labels.instance }}"
+      description: "Процессор {{ $labels.processor_name }} находится в состоянии ошибки"
+
+  - alert: NiFiHighProcessorErrors
+    expr: rate(nifi_processor_errors_total[5m]) > 10
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Высокое количество ошибок процессора на {{ $labels.instance }}"
+      description: "Процессор {{ $labels.processor_name }} имеет более 10 ошибок в минуту"
+
+  # Алерты сети
+  - alert: NiFiHighNetworkLatency
+    expr: nifi_cluster_node_response_time > 0.1
+    for: 5m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Высокая сетевая задержка на {{ $labels.instance }}"
+      description: "Время отклика узла кластера превышает 100 мс"
+
+  # Алерты пропускной способности
+  - alert: NiFiLowDataThroughput
+    expr: rate(nifi_flowfiles_in[5m]) < 100
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Низкая пропускная способность данных на {{ $labels.instance }}"
+      description: "Пропускная способность данных менее 100 flowfiles в минуту"
