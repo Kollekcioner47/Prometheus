@@ -1,0 +1,79 @@
+1. Экспортер / метрики недоступны
+- alert: FlinkExporterDown
+  expr: up{job="flink"} == 0
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Flink метрики недоступны ({{ $labels.instance }})"
+    description: "Экспортер Flink или REST API не отвечает."
+
+2. JobManager недоступен
+- alert: FlinkJobManagerDown
+  expr: flink_jobmanager_job_uptime < 1
+  for: 2m
+  labels:
+    severity: critical
+  annotations:
+    summary: "JobManager Flink недоступен"
+    description: "JobManager instance {{ $labels.instance }} не работает."
+
+3. TaskManager недоступен
+- alert: FlinkTaskManagerDown
+  expr: flink_taskmanager_Status_JVM_CPU_Load == 0
+  for: 2m
+  labels:
+    severity: critical
+  annotations:
+    summary: "TaskManager Flink недоступен ({{ $labels.instance }})"
+    description: "TaskManager не отдаёт метрики CPU — возможно он упал."
+
+4. Упавшие задачи (Failed Tasks)
+- alert: FlinkFailedTasks
+  expr: increase(flink_taskmanager_job_task_failures_total[5m]) > 0
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Flink ошибки выполнения задач ({{ $labels.job }})"
+    description: "Есть зафейленные задачи в {{ $labels.job }} за последние 5 минут."
+
+5. Долгие checkpoint’ы
+- alert: FlinkCheckpointDurationHigh
+  expr: flink_jobmanager_job_checkpoint_duration_seconds_max > 30
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Flink checkpoint медленный ({{ $labels.job }})"
+    description: "Checkpoint занимает больше 30 секунд."
+
+6. Ошибки checkpoint’ов
+- alert: FlinkCheckpointFailures
+  expr: increase(flink_jobmanager_job_checkpoint_failures_total[10m]) > 0
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Flink checkpoint failure ({{ $labels.job }})"
+    description: "В {{ $labels.job }} есть ошибки checkpoint за последние 10 минут."
+
+7. Задержка обработки (Latency / Backpressure)
+- alert: FlinkBackpressure
+  expr: flink_taskmanager_job_task_backPressuredTimeMsPerSecond > 200
+  for: 10m
+  labels:
+    severity: warning
+  annotations:
+    summary: "Flink backpressure ({{ $labels.job }}, {{ $labels.task }})"
+    description: "Задача испытывает backpressure дольше 200 мс/сек."
+
+8. Нехватка слотов
+- alert: FlinkInsufficientTaskSlots
+  expr: flink_jobmanager_taskSlots_available < 1
+  for: 5m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Недостаточно task slots в Flink"
+    description: "В JobManager закончились доступные task slots."
