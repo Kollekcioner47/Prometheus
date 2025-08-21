@@ -1,0 +1,56 @@
+groups:
+- name: kafka_alerts
+  interval: 30s
+  rules:
+  # 1. Консюмер сильно отстаёт
+  - alert: KafkaConsumerHighLag
+    expr: (kafka_burrow_topic_partition_offset 
+           - on(partition, cluster, topic) group_right() kafka_burrow_partition_current_offset) > 100000
+    for: 10m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Высокий lag у Kafka консюмера ({{ $labels.cluster }}/{{ $labels.group }})"
+      description: "Lag превышает 100k сообщений и держится >10 минут\nVALUE={{ $value }}"
+
+  # 2. Lag не уменьшается
+  - alert: KafkaConsumerLagNotDecreasing
+    expr: (kafka_burrow_topic_partition_offset - on(partition, cluster, topic) group_right() kafka_burrow_partition_current_offset)
+          >= (kafka_burrow_topic_partition_offset offset 15m - on(partition, cluster, topic) group_right() kafka_burrow_partition_current_offset offset 15m)
+          and (kafka_burrow_topic_partition_offset - on(partition, cluster, topic) group_right() kafka_burrow_partition_current_offset) > 0
+    for: 15m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Kafka consumer lag растёт ({{ $labels.cluster }}/{{ $labels.group }})"
+      description: "Lag не уменьшается >15 минут\nVALUE={{ $value }}"
+
+  # 3. Консюмер не читает (offset не движется)
+  - alert: KafkaConsumerNoProgress
+    expr: delta(kafka_burrow_partition_current_offset[5m]) == 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Kafka consumer не двигается ({{ $labels.cluster }}/{{ $labels.group }})"
+      description: "Offset не изменялся более 10 минут\nVALUE={{ $value }}"
+
+  # 4. Partition offset уменьшился
+  - alert: KafkaTopicOffsetDecreased
+    expr: delta(kafka_burrow_partition_current_offset[1m]) < 0
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: "Kafka topic offset уменьшился ({{ $labels.cluster }}/{{ $labels.topic }}/{{ $labels.partition }})"
+      description: "Offset внезапно уменьшился (возможен rollback или пересоздание топика)\nVALUE={{ $value }}"
+
+  # 5. Нет данных от Burrow
+  - alert: KafkaBurrowDown
+    expr: up{job="kafka-burrow"} == 0
+    for: 5m
+    labels:
+      severity: critical
+    annotations:
+      summary: "Kafka Burrow не отвечает (job={{ $labels.job }})"
+      description: "Метрики Burrow недоступны более 5 минут"
