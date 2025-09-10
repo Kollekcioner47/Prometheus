@@ -1,0 +1,66 @@
+groups:
+- name: NGINX Alerts
+  rules:
+  - alert: NGINX Down
+    expr: nginx_up == 0
+    for: 0m
+    labels:
+      severity: critical
+    annotations:
+      summary: Nginx is down (instance {{ $labels.instance }})
+      description: No nginx metrics
+  
+  - alert: Nginx5xxErrors
+    expr: sum(rate(nginx_http_requests_total{status=~"5.."}[1m])) by (instance) / sum(rate(nginx_http_requests_total[1m]))by (instance) > 0.05
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary:  To much 5xx errors(instance {{ $labels.instance }})
+      description: Server erros affecting to users
+  
+  - alert: Nginx4xxErrors
+    expr: sum(rate(nginx_http_requests_total{status=~"4.."}[1m])) by (instance) / sum(rate(nginx_http_requests_total[1m])) by (instance) > 0.05
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary:  To much 4xx errors(instance {{ $labels.instance }})
+      description: Server erros affecting to users
+
+  - alert: NginxHighResponseTime
+    expr: histogram_quantile(0.95, rate(nginx_http_requests_duration_seconds_bucket[5m])) > 3
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: High Response Time (instance {{ $labels.instance }})
+      description: 95% response time is above 3 seconds 
+  
+  - alert: NginxAbnormalResponseTime
+    expr: histogram_quantile(0.95, rate(nginx_http_requests_duration_seconds_bucket[2m])) > histogram_quantile(0.95, rate(nginx_http_requests_duration_seconds_bucket[10m])) * 2
+    for: 0m
+    labels:
+      severity: warning
+    annotations:
+      summary: Abnormal Response Time (instance {{ $labels.instance }})
+      description: Response time has doubled compared tp the 10-minute baseline 
+  
+  - alert: NginxNoTraffic
+    expr: rate(nginx_http_requests_total[5m]) == 0
+    for: 10m
+    labels:
+      severity: warning
+    annotations:
+      summary: No traffic detected (instance {{ $labels.instance }})
+      description: Service may be not available
+
+  - alert: NginxTrafficAnomaly
+    expr: abs((rate(nginx_http_requests_total[5m])-rate(nginx_http_requests_total[5m] offset 1d))/rate(nginx_http_requests_total[5m] offset 1d)) > 0.5
+    for: 5m
+    labels:
+      severity: warning
+      source: nginx-exporter
+    annotations:
+      summary: Traffic Anomaly Detected (instance {{ $labels.instance }})
+      description: Current traffic diff by more 50% from same time yesterday 
