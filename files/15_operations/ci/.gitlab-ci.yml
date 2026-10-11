@@ -1,0 +1,94 @@
+# Конвейер проверки конфигураций мониторинга.
+#
+# Этот файл — предмет изучения в практике 15, а не готовый решающий
+# скрипт: он ничего не устанавливает на стенде. Каждая стадия
+# запускает ровно ту команду, которую студент выполнял руками,
+# и отличается от ручного запуска только тем, что выполняется
+# автоматически на каждом изменении в репозитории.
+#
+# Бинарники promtool и amtool берутся из архивов тех же версий,
+# что закреплены в методике курса. Тег latest не используется:
+# на вопрос «какой версией проверяли» должен быть ответ.
+
+stages:
+  - validate
+  - lint
+
+variables:
+  PROMETHEUS_VERSION: "3.15.0"
+  ALERTMANAGER_VERSION: "0.34.1"
+  CONFIG_DIR: "/etc/prometheus"
+  AM_CONFIG_DIR: "/etc/alertmanager"
+
+# Проверка главного файла конфигурации и всех файлов правил,
+# на которые он ссылается через rule_files.
+promtool-check-config:
+  stage: validate
+  image: ubuntu:26.04
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl tar
+    - curl -sSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+    - tar xzf "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+    - cp "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/
+  script:
+    # promtool ищет файлы правил относительно того каталога, где
+    # лежит сам prometheus.yml, поэтому запуск идёт из CONFIG_DIR.
+    - cd "$CONFIG_DIR"
+    - promtool check config prometheus.yml
+
+# Отдельная проверка правил: ловит ошибки в файлах, которые
+# подключены к Prometheus, но ещё не читались при перезагрузке.
+promtool-check-rules:
+  stage: validate
+  image: ubuntu:26.04
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl tar
+    - curl -sSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+    - tar xzf "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+    - cp "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/
+  script:
+    - cd "$CONFIG_DIR"
+    - promtool check rules rules/*.rules.yml
+
+# Тесты правил на выдуманных рядах: единственная стадия, которая
+# проверяет не синтаксис, а смысл — что оповещение срабатывает.
+promtool-test-rules:
+  stage: validate
+  image: ubuntu:26.04
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl tar
+    - curl -sSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+    - tar xzf "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+    - cp "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/
+  script:
+    - cd "$CONFIG_DIR"
+    - promtool test rules rules/tests/*.test.yml
+
+# Проверка дерева маршрутов Alertmanager и шаблонов сообщений.
+# Перезапуск Alertmanager при ошибке в конфигурации оставил бы
+# дежурного без оповещений вообще.
+amtool-check-config:
+  stage: validate
+  image: ubuntu:26.04
+  before_script:
+    - apt-get update -qq
+    - apt-get install -y -qq curl tar
+    - curl -sSLO "https://github.com/prometheus/alertmanager/releases/download/v${ALERTMANAGER_VERSION}/alertmanager-${ALERTMANAGER_VERSION}.linux-amd64.tar.gz"
+    - tar xzf "alertmanager-${ALERTMANAGER_VERSION}.linux-amd64.tar.gz"
+    - cp "alertmanager-${ALERTMANAGER_VERSION}.linux-amd64/amtool" /usr/local/bin/
+  script:
+    - cd "$AM_CONFIG_DIR"
+    - amtool check-config alertmanager.yml
+
+# Синтаксис YAML во всём репозитории: отступы, табы, дубли ключей.
+# Смысла конфигурации эта стадия не проверяет.
+yamllint:
+  stage: lint
+  image: python:3.13-slim
+  before_script:
+    - pip install --quiet yamllint==1.35.1
+  script:
+    - yamllint -c ci/.yamllint "$CONFIG_DIR" "$AM_CONFIG_DIR"

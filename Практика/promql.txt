@@ -1,8 +1,0 @@
-Node exporter:
-node_disk_info
-node_os_info
-
-
-Windows exporter:
-windows_cs_hostname
-windows_os_info

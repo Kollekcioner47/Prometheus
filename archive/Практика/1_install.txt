@@ -1,0 +1,161 @@
+﻿Качаем последнюю версию Prometheus
+https://prometheus.io/download
+
+далее распаковываем и заходим в папку
+tar xvfz prometheus-*.tar.gz
+cd prometheus-*
+Затем скопируйте исполняемые файлы prometheus и promtool в папку /usr/local/bin:
+
+sudo cp ~/Загрузки/prometheus-2.26.0.linux-amd64/prometheus /usr/local/bin
+
+sudo cp ~/Загрузки/prometheus-2.26.0.linux-amd64/promtool /usr/local/bin
+
+ГлавнаяИнструкцииУстановка и настройка Prometheus
+УСТАНОВКА И НАСТРОЙКА PROMETHEUSИнструкции Обновлено:  3 марта, 2022  12  admin 
+Отслеживать состояние сервера и запущенных на нём процессов очень важно чтобы иметь возможность вовремя оптимизировать настройки, исправить ошибки или реагировать на повышенную нагрузку. Существует множество систем мониторинга для Linux различной сложности. В этой статье речь пойдёт про Prometheus.
+
+
+Эта система мониторинга состоящая из нескольких компонентов, написанных на языке программирования Golang. Основной компонент Prometheus - это база данных для хранения метрик. Ещё есть компоненты *_exporter для сбора данных с различных сервисов и компонент alertmanager для отправки уведомлений. Кроме того, для отображения метрик в удобном виде принято использовать Grafana. Давайте же рассмотрим как выполняется установка и настройка Prometheus на примере Ubuntu 20.04.
+
+Содержание статьи:
+
+Установка и настройка Prometheus
+1. Установка Prometheus
+2. Запуск Prometheus
+3. Доступ к веб-интерфейсу
+4. Установка Grafana
+5. Настройка Grafana для Prometheus
+6. Импорт доски Prometheus в Grafana
+7. Установка Node Exporter
+Шаг 8. Настройка node_exporter
+Шаг 9. Добавление node_exporter в prometheus
+Шаг 10. Импорт доски для Node Exporter
+Выводы
+УСТАНОВКА И НАСТРОЙКА PROMETHEUS
+1. УСТАНОВКА PROMETHEUS
+Вы можете установить Prometheus из официальных репозиториев в Ubuntu. Вы можете посмотреть какие пакеты prometheus доступны можно такой командой:
+
+sudo apt search prometheus
+
+
+
+Для установки выполните команду:
+
+sudo apt install prometheus
+
+Однако в репозиториях содержится уже старая версия программы. Если вы хотите самую свежую версию, то придется скачать её из официального сайта. Поскольку программа написана на Golang, то и распространяется она в виде одного исполняемого файла. Поэтому установить её не сложно, достаточно скачать архив, распаковать и скопировать исполняемый файл в папку /usr/local/bin, также надо будет скопировать несколько исполняемых файлов.
+
+Сначала скачайте пакет Prometheus с официальной страницы GitHub. Для Linux нужен пакет с исполняемыми файлами linux-amd64:
+
+
+
+ 
+
+Загруженный документ надо распаковать. Для этого можно воспользоваться утилитой tar:
+
+tar xvf ~/Загрузки/prometheus-2.26.0.linux-amd64.tar.gz
+
+Затем скопируйте исполняемые файлы prometheus и promtool в папку /usr/local/bin:
+
+sudo cp ~/Загрузки/prometheus-2.26.0.linux-amd64/prometheus /usr/local/bin
+
+sudo cp ~/Загрузки/prometheus-2.26.0.linux-amd64/promtool /usr/local/bin
+
+
+
+Для конфигурационных файлов необходимо создать папку /etc/prometheus:
+
+sudo mkdir /etc/prometheus
+
+Затем скопируйте туда такие папки с конфигурационными файлами:
+
+sudo cp -r ~/Загрузки/prometheus-2.26.0.linux-amd64/consoles /etc/prometheus
+
+sudo cp -r ~/Загрузки/prometheus-2.26.0.linux-amd64/console_libraries /etc/prometheus
+
+В них содержатся файлы для работы веб-интерфейса программы. Кроме того, нужно создать конфигурационный файл /etc/prometheus/prometheus.yml со следующим содержимым:
+
+sudo vi /etc/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: 'prometheus'
+    scrape_interval: 5s
+    static_configs:
+      - targets: ['localhost:9090']
+
+Если у вас несколько Prometheus серверов, тогда пишем так:
+global:
+  scrape_interval: 15s
+scrape_configs:
+  - job_name: 'prometheus'
+    scrape_interval: 5s
+    static_configs:
+      - targets: 
+	  - localhost:9090
+	  - ipвторогосервера:9090
+          - ipтретьегосервера:9090
+	  - ipNсервера:9090
+
+
+
+Здесь сказано, что по умолчанию интервал сбора данных составляет 15 секунд, а также добавлена задача по сборку данных с самого Prometheus. Никаких данных о состоянии сервера там не будет, только параметры работы программы.
+
+Для запуска программы понадобится пользователь prometheus:
+
+sudo useradd --no-create-home --shell /bin/false prometheus
+
+Осталось только создать файл systemd службы для удобного запуска prometheus. Для этого выполните команду:
+
+sudo systemctl edit --full --force prometheus.service
+
+[Unit]
+Description=Prometheus
+Wants=network-online.target
+After=network-online.target
+[Service]
+User=prometheus
+Group=prometheus
+Type=simple
+ExecStart=/usr/local/bin/prometheus \
+--config.file /etc/prometheus/prometheus.yml \
+--storage.tsdb.path /var/lib/prometheus/ \
+--web.console.templates=/etc/prometheus/consoles \
+--web.console.libraries=/etc/prometheus/console_libraries
+[Install]
+WantedBy=multi-user.target
+
+Нужно создать папку для логов
+mkdir /var/lib/prometheus
+chown -R prometheus:prometheus /var/lib/prometheus
+
+После этого можно запустить Prometheus и проверить его работу. Для этого выполните:
+
+sudo systemctl start prometheus
+
+Затем для того чтобы убедится что всё запустилось выполните:
+
+sudo systemctl status prometheus
+
+Если программа запущена, вы можете получить доступ к веб-интерфейсу в браузере. Откройте порт 9090 на сервере, куда вы устанавливали Prometheus
+
+Смотреть графики Prometheus в его веб-интерфейсе не удобно и не практично. Там вы можете только убедится, что всё собирается верно. Для просмотра графиков же следует использовать Grafana. Для её установки надо сначала установить несколько компонентов:
+
+sudo apt install -y apt-transport-https
+
+sudo apt install -y software-properties-common
+
+Затем добавьте ключ репозитория в систему:
+
+curl -s https://packages.grafana.com/gpg.key | sudo gpg --no-default-keyring --keyring gnupg-ring:/etc/apt/trusted.gpg.d/grafana_key.gpg --import
+
+И добавьте сам репозиторий:
+
+echo "deb https://packages.grafana.com/enterprise/deb stable main" | sudo tee -a /etc/apt/sources.list.d/grafana.list
+
+После этого обновите список пакетов в репозиториях и установите Grafana:
+
+sudo apt update
+
+sudo apt install grafana

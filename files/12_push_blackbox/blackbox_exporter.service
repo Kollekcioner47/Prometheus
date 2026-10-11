@@ -1,0 +1,26 @@
+[Unit]
+Description=blackbox_exporter
+Documentation=https://github.com/prometheus/blackbox_exporter
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=blackbox
+Group=blackbox
+Type=simple
+ExecStart=/usr/local/bin/blackbox_exporter \
+    --config.file=/etc/blackbox_exporter/blackbox.yml \
+    --web.listen-address=:9115
+Restart=on-failure
+RestartSec=5s
+
+# ICMP-пробер открывает сырой сокет, поэтому добавляем
+# ровно одну привилегию — и ничего больше. CapabilityBoundingSet
+# оставляет процессу только её: даже если служба будет
+# скомпрометирована, root из неё не получится.
+AmbientCapabilities=CAP_NET_RAW
+CapabilityBoundingSet=CAP_NET_RAW
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

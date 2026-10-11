@@ -1,0 +1,20 @@
+Для сбора метрик нам необходимо установить специальный контейнер на сервер Docker:
+
+docker run --name docker_exporter --detach --restart always --volume "/var/run/docker.sock":"/var/run/docker.sock" --publish 9417:9417 prometheusnet/docker_exporter
+
+На сервере Prometheus нужно добавить в Prometheus.yml
+ - job_name: 'my_docker_metrics'
+    static_configs:
+      - targets:
+        - 10.0.2.5:9417
+
+перезапускаем сервис и смотрим на портале в tarets, появился ли там наш Nginx
+sudo systemctl restart prometheus
+
+http://localhost:9090
+
+Переходим в графану и настравиваем понравившися дашбоард, например 11467
+http://localhost:3000
+
+Для более наглядного отображения наполите свой докер контейнерами, например
+из ораза alpine-apache

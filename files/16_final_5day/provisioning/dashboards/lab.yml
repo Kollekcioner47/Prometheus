@@ -1,0 +1,26 @@
+# Провайдер дашбордов Grafana. Практика 16, шаг 7.
+#
+# Файл кладётся в /etc/grafana/provisioning/dashboards/lab.yml.
+# Он говорит Grafana: «читай JSON-файлы из этого каталога и делай
+# из них дашборды». Каталог /var/lib/grafana/dashboards при этом
+# монтируется или копируется из репозитория.
+#
+# allowUiUpdates: false — важное решение. Дашборд, отредактированный
+# мышью и сохранённый, живёт до следующего перезапуска Grafana,
+# а потом возвращается к версии из файла. Это не потеря работы,
+# а способ не разойтись с git: правки вносятся в JSON и коммитятся.
+
+apiVersion: 1
+
+providers:
+  - name: lab
+    orgId: 1
+    folder: Lab
+    folderUid: lab-folder
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    updateIntervalSeconds: 30
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false

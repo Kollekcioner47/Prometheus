@@ -1,0 +1,116 @@
+# Маршрутизация оповещений итоговой работы. Практика 16, шаг 6.
+#
+# Требование задания: critical — немедленно, warning — группой
+# раз в час, info — только в дашборд.
+#
+# «Только в дашборд» означает, что у маршрута info нет получателя,
+# кроме пустого. Alertmanager не умеет «не отправлять»: у каждого
+# маршрута есть receiver, и если сообщение не должно уходить людям,
+# получателем становится тот, который ничего не делает с текстом.
+# Такой получатель записан первым, и это осознанное решение:
+# иначе молчаливый маршрут выглядит как забытый.
+#
+# Токены и пароли здесь — заглушки. В рабочей среде их подставляет
+# система управления конфигурацией или файл секретов, а сам
+# alertmanager.yml лежит с правами 600 и владельцем prometheus.
+
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: "smtp.lab.local:587"
+  smtp_from: "alertmanager@lab.local"
+  smtp_auth_username: "alertmanager@lab.local"
+  smtp_auth_password: "REPLACE_WITH_SMTP_PASSWORD"
+  smtp_require_tls: true
+
+templates:
+  - /etc/alertmanager/templates/lab.tmpl
+
+route:
+  receiver: info-only
+  group_by: ["alertname", "instance"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # critical: без ожидания группы, повтор каждые 30 минут.
+    # group_wait: 0s здесь уместен, потому что цена задержки
+    # выше цены одного лишнего письма.
+    - matchers:
+        - severity="critical"
+      receiver: oncall-email
+      group_wait: 0s
+      group_interval: 5m
+      repeat_interval: 30m
+      continue: false
+
+    # warning: группируем и отправляем раз в час. За час группа
+    # наберёт связанные оповещения одной машины в одно письмо.
+    - matchers:
+        - severity="warning"
+      receiver: duty-email
+      group_by: ["alertname", "instance", "device"]
+      group_wait: 5m
+      group_interval: 1h
+      repeat_interval: 12h
+      continue: false
+
+    # info: в дашборд. Получатель ничего не отправляет, но история
+    # оповещений остаётся в Alertmanager и видна в Grafana.
+    - matchers:
+        - severity="info"
+      receiver: info-only
+      group_wait: 5m
+      group_interval: 1h
+      repeat_interval: 24h
+      continue: false
+
+receivers:
+  # Пустой получатель: ни почты, ни вебхука. Нужен как явная
+  # точка «сюда сообщения не идут».
+  #
+  # Отсутствие каналов доставки здесь — решение, а не недоделка:
+  # маршрут info обязан куда-то вести, и он ведёт в получатель,
+  # который ничего не отправляет. Оповещения при этом остаются
+  # в Alertmanager и видны в дашборде.
+  - name: info-only
+
+  - name: oncall-email
+    email_configs:
+      - to: "oncall@lab.local"
+        send_resolved: true
+        headers:
+          subject: "[CRITICAL] {{ .CommonLabels.alertname }}"
+
+  - name: duty-email
+    email_configs:
+      - to: "duty@lab.local"
+        send_resolved: false
+    webhook_configs:
+      - url: "http://10.0.2.5:9095/alerts"
+        send_resolved: false
+
+inhibit_rules:
+  # Если машина недоступна, про её диск и память молчим: причины
+  # не будет видно всё равно, а сообщений станет втрое больше.
+  - source_matchers:
+      - alertname="InstanceDown"
+    target_matchers:
+      - severity=~"warning|critical"
+    equal: ["instance"]
+
+  # Заполненный диск подавляет предсказание «диск кончится»:
+  # одно и то же событие на разных стадиях.
+  - source_matchers:
+      - alertname="HostOutOfDiskSpace"
+    target_matchers:
+      - alertname="DiskWillFillIn4Hours"
+    equal: ["instance", "device"]
+
+  # Внешняя проверка не проходит — про сам сервис внутри
+  # ничего не сообщаем, пока не выяснится причина.
+  - source_matchers:
+      - alertname="BlackboxProbeFailed"
+    target_matchers:
+      - severity="warning"
+    equal: ["instance"]

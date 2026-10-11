@@ -1,0 +1,31 @@
+{{/* Шаблоны сообщений Alertmanager для стенда курса.
+     Файл подключается строкой templates: '/etc/alertmanager/templates/*.tmpl'.
+     Здесь два шаблона: telegram.message для текста в Telegram и email.subject
+     для темы письма. Один файл на все получатели — так правки не разъезжаются. */}}
+
+{{/* Telegram, parse_mode: HTML. Помните: символы <, > и & в метках
+     и аннотациях надо экранировать, иначе Telegram отвергнет сообщение
+     целиком, и в логе Alertmanager будет ошибка разбора разметки. */}}
+{{ define "telegram.message" }}
+{{- $firing := .Alerts.Firing -}}
+{{- $resolved := .Alerts.Resolved -}}
+<b>{{ .Status | title }}</b>: {{ .CommonLabels.alertname }}
+Цель: {{ .CommonLabels.instance }} (env={{ .CommonLabels.env }})
+Горит: {{ len $firing }}, закрыто: {{ len $resolved }}, всего: {{ len .Alerts }}
+{{ if .CommonAnnotations.summary }}Суть: {{ .CommonAnnotations.summary }}
+{{ end }}
+{{ range .Alerts -}}
+— <b>{{ .Labels.alertname }}</b> [{{ .Labels.severity }}] {{ .Status | title }}
+  {{ .Annotations.description | reReplaceAll "\n" " " }}
+  Начало: {{ .StartsAt.Format "2006-01-02 15:04:05" }}, идёт {{ .StartsAt | since }}
+{{/* time_left_seconds появится, если правило положит в аннотацию число
+     секунд. Правила практик 8 и 10 такой аннотации не дают, поэтому
+     строка ниже ничего не печатает: это образец, а не рабочий пример. */}}
+{{ if .Annotations.time_left_seconds }}  Осталось: {{ .Annotations.time_left_seconds | humanizeDuration }}
+{{ end }}
+{{ end -}}
+{{ end }}
+
+{{ define "email.subject" }}
+{{- if eq .Status "firing" }}[FIRING]{{ else }}[RESOLVED]{{ end }} {{ .CommonLabels.alertname }} — {{ .CommonLabels.instance }} ({{ len .Alerts }})
+{{- end }}

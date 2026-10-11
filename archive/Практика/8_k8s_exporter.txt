@@ -1,0 +1,21 @@
+Для мониторинга Kubernetes мы будем использовать kube-prometheus-stack
+Сначала нам нужно установить helm согласно документации
+
+https://helm.sh/ru/docs/intro/install/
+
+Затем нам нужно подключить репозиторий
+helm repo add prometheus-community https://prometheus-community.github.io/helm-charts
+helm repo update
+
+helm install my-prometheus prometheus-community/kube-prometheus-stack
+
+После развёртывания, смотрим список сервисов
+kubectl get service
+смотрим ip Grafana service и открываем в браузере
+логин: admin
+пароль: prom-operator
+
+Там уже готовы множество дашбордов для наблюдения за кластером
+
+
+https://selectel.ru/blog/tutorials/monitoring-in-k8s-with-prometheus/

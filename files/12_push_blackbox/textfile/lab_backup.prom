@@ -1,0 +1,19 @@
+# Образец файла для textfile collector node_exporter.
+# Лежит в /var/lib/node_exporter/textfile/lab_backup.prom.
+# Имя файла заканчивается на .prom — node_exporter читает только
+# такие файлы и молча пропускает остальные.
+#
+# Задание backup на db1 пишет этот файл заново после каждого
+# запуска: сначала пишет lab_backup.prom.tmp, потом переименовывает
+# его в lab_backup.prom. Переименование в пределах одной файловой
+# системы атомарно, поэтому node_exporter не увидит половину файла.
+
+# HELP lab_job_last_success_timestamp_seconds Время успешного
+#   завершения последнего запуска задания, секунды Unix.
+# TYPE lab_job_last_success_timestamp_seconds gauge
+lab_job_last_success_timestamp_seconds{job_name="backup",host="db1"} 1.771234567e+09
+
+# HELP lab_batch_jobs_total Число запусков пакетного задания
+#   с момента установки.
+# TYPE lab_batch_jobs_total counter
+lab_batch_jobs_total{job_name="backup",host="db1"} 42

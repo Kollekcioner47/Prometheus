@@ -1,0 +1,25 @@
+# Источник данных Prometheus для Grafana — как код.
+#
+# Файл кладётся в /etc/grafana/provisioning/datasources/prometheus.yml
+#
+# Смысл провижининга: источник данных описан файлом, лежит в git
+# и создаётся автоматически при старте Grafana. Это надёжнее, чем
+# один раз настроить его мышью: ручная настройка живёт только
+# в базе одной Grafana и теряется вместе с ней.
+
+apiVersion: 1
+
+datasources:
+  - name: prometheus
+    type: prometheus
+    access: proxy
+    url: http://10.0.2.5:9090
+    isDefault: true
+    # editable: false — источник нельзя править в интерфейсе.
+    # Иначе появится вторая версия настройки, и никто не будет знать,
+    # какая из них настоящая.
+    editable: false
+    jsonData:
+      # Интервал опроса совпадает с scrape_interval Prometheus (15s).
+      timeInterval: 15s
+      httpMethod: POST

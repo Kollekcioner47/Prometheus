@@ -1,0 +1,147 @@
+# Итоговая конфигурация Prometheus для стенда курса.
+# Практика 16, трек «5 дней».
+#
+# Отличия от учебных конфигураций предыдущих практик:
+#   * ни одной секции static_configs — цели только из файлов;
+#   * файлы правил подключены абсолютными путями;
+#   * маршрутизация оповещений описана получателями, а не одним
+#     получателем по умолчанию;
+#   * блок remote_write записан, но закомментирован: отдалённого
+#     хранилища в стенде нет.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: lab
+    monitor: prometheus-01
+
+rule_files:
+  - /etc/prometheus/rules/recording.rules.yml
+  - /etc/prometheus/rules/alerting.rules.yml
+
+storage:
+  tsdb:
+    retention:
+      time: 15d
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 10.0.2.5:9093
+
+# Отдалённое хранилище: в стенде курса его нет.
+# Блок оставлен закомментированным, чтобы было видно место, куда
+# он встанет при появлении VictoriaMetrics или Thanos. Пока он
+# закомментирован, данные не покидают машину mon и живут 15 дней.
+#
+# remote_write:
+#   - url: http://<VM_HOST>:8428/api/v1/write
+#     queue_config:
+#       max_samples_per_send: 2000
+#       capacity: 10000
+#     write_relabel_configs:
+#       - source_labels: [__name__]
+#         regex: 'node_cpu_seconds_total|node_memory_.*'
+#         action: keep
+
+scrape_configs:
+  # Сам Prometheus: одно задание, одна цель.
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  # Все машины стенда: цели приходят из файла, который читается
+  # заново каждые 30 секунд. Добавление машины — правка JSON,
+  # а не правка этой конфигурации.
+  - job_name: node
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.json
+        refresh_interval: 30s
+
+  # Службы: адреса заданы прямо здесь, потому что их ровно три
+  # и они не меняются. Файл нужен там, где список растёт.
+  - job_name: nginx
+    static_configs:
+      - targets:
+          - 10.0.2.11:9113
+        labels:
+          env: lab
+
+  - job_name: postgres
+    static_configs:
+      - targets:
+          - 10.0.2.12:9187
+        labels:
+          env: lab
+
+  - job_name: docker
+    static_configs:
+      - targets:
+          - 10.0.2.13:8080
+        labels:
+          env: lab
+
+  # Свой экспортёр из практики 13: тот же порт 9200,
+  # та же учётная запись lab_exporter.
+  - job_name: lab_exporter
+    static_configs:
+      - targets:
+          - 10.0.2.13:9200
+        labels:
+          env: lab
+
+  # Pushgateway: honor_labels обязателен, иначе метки job и instance
+  # из URL отправки будут перезаписаны метками задания.
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets:
+          - localhost:9091
+        labels:
+          env: lab
+
+  # Проверки извне: blackbox_exporter стоит на mon, а цели
+  # подставляются через __param_target, поэтому задание одно,
+  # а проверок сколько угодно.
+  - job_name: blackbox_http
+    metrics_path: /probe
+    params:
+      module:
+        - http_2xx
+    static_configs:
+      - targets:
+          - https://prometheus.io
+          - http://10.0.2.11
+        labels:
+          env: lab
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 10.0.2.5:9115
+
+  # Проверка TLS-порта: цель недоступна — сертификат не отдаётся.
+  # На этом строится третий учебный отказ в практике 16.
+  - job_name: blackbox_tls
+    metrics_path: /probe
+    params:
+      module:
+        - tcp_connect
+    static_configs:
+      - targets:
+          - 10.0.2.11:443
+        labels:
+          env: lab
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: __param_target
+      - source_labels: [__param_target]
+        target_label: instance
+      - target_label: __address__
+        replacement: 10.0.2.5:9115

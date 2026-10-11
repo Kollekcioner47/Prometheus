@@ -1,0 +1,143 @@
+a.anchor {
+    font-size: 15px;
+    vertical-align: middle;
+    color: darkblue;
+    display: inline-block;
+    padding-bottom: 5px;
+    margin-right: 5px;
+    opacity: 0;
+    transition: opacity 0.4s;
+}
+
+h2:hover a.anchor,
+h3:hover a.anchor,
+h4:hover a.anchor {
+    opacity: 1;
+}
+
+summary {
+    position: relative;
+    padding-left: 60px;
+    padding-right: 50px;
+    margin-bottom: 15px;
+    font-size: 15px;
+}
+
+h2 {
+    position: relative;
+}
+
+.clipboard-single,
+.clipboard-multiple {
+    right: 0;
+    position: absolute;
+    cursor: pointer;
+    font-size: 14px;
+    color: #606c71;
+}
+
+/* NAVBAR */
+#rules-navbar.affix {
+    /* showed by JS */
+    display: none;
+
+    position: fixed;
+    overflow: auto;
+    top: 0;
+    right: 0;
+    max-width: 250px;
+    max-height: 100%;
+    padding-top: 20px;
+    padding-bottom: 20px;
+    padding-left: 20px;
+    padding-right: 10px;
+
+    background-color: #f3f6fa;
+}
+
+/* hide menu on small screens */
+@media screen and (max-width: 1350px) {
+    #rules-navbar.affix {
+        display: none !important;
+    }
+}
+
+/* hide menu scrollbar */
+#rules-navbar.affix::-webkit-scrollbar {
+    display: none;
+}
+
+#rules-navbar.affix {
+    -ms-overflow-style: none;
+    /* IE and Edge */
+    scrollbar-width: none;
+    /* Firefox */
+}
+
+#rules-navbar.affix h3 {
+    margin-bottom: 10px;
+}
+
+#rules-navbar.affix h4 {
+    margin: 0;
+    font-weight: bold;
+    font-size: 14px;
+    line-height: 14px;
+}
+
+#rules-navbar.affix ul,
+#rules-navbar.affix ul li {
+    margin: 0;
+    padding-top: 0;
+    padding-bottom: 0;
+    line-height: normal;
+}
+
+#rules-navbar.affix>ul {
+    padding-left: 0;
+    padding-right: 0;
+}
+
+#rules-navbar.affix>ul>li {
+    margin-bottom: 10px;
+    padding-left: 0;
+    padding-right: 0;
+}
+
+#rules-navbar.affix a {
+    font-size: 14px;
+    line-height: 14px;
+}
+
+/* https://github.com/samber/awesome-prometheus-alerts/issues/356 */
+@media screen and (min-width: 64em) {
+    .main-content {
+        max-width: 85rem;
+    }
+}
+
+ul#sponsoring {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    margin-top: 50px;
+}
+
+ul#sponsoring li {
+    display: flex;
+    padding: 0px 15px;
+    font-size: 16px;
+}
+
+ul#sponsoring li a {
+    display: flex;
+}
+
+ul#sponsoring li a img {
+    max-width: 180px;
+    max-height: 80px;
+}
+
+.page-header {
+    padding-bottom: 30px;
+}

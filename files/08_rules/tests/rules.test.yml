@@ -1,0 +1,172 @@
+# files/08_rules/tests/rules.test.yml
+#
+# Юнит-тест правил для promtool test rules. Проверяет не конфигурацию,
+# а поведение: при таких входных рядах такое правило должно оказаться
+# в состоянии Firing или не оказаться вовсе.
+#
+# Запуск из каталога files/08_rules:
+#
+#   promtool test rules tests/rules.test.yml
+#
+# Файл проверки ссылается на файл правил, поэтому путь в rule_files
+# здесь относительный — от того каталога, из которого запущен promtool.
+#
+# load_interval: 15s означает, что promtool «проигрывает» входные ряды
+# с шагом 15 секунд, как их собирал бы Prometheus с scrape_interval: 15s.
+# Значения между точками он интерполирует, а не повторяет.
+#
+# Каждый блок evaluation_time задаёт момент, на который promtool
+# вычисляет правила. Alert_rule_test проверяет состояние оповещения
+# именно в этот момент: exp_alerts содержит оповещения в состоянии
+# Firing, пустой список означает «здесь не должно гореть ничего».
+
+rule_files:
+  - alerting.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+
+  # Первое правило: цель недоступна.
+  - interval: 15s
+    input_series:
+      # Цель отвечает, начиная с 10 минут: ряд принимает значение 1.
+      # Так выглядит восстановление после недоступности.
+      - series: 'up{job="node", instance="10.0.2.11:9100"}'
+        values: '0x40 1x40'
+      # Вторая цель отвечает всё время: она показывает, что оповещение
+      # привязано к конкретному ряду, а не к заданию целиком.
+      - series: 'up{job="node", instance="10.0.2.12:9100"}'
+        values: '1x80'
+
+    alert_rule_test:
+      # Через 30 секунд условие истинно, но for: 1m ещё не отсчитан.
+      # Оповещение существует в состоянии Pending, а exp_alerts его
+      # не показывает: promtool считает Firing'ом только дошедшее
+      # до конца выдержки.
+      - eval_time: 30s
+        alertname: InstanceDown
+        exp_alerts: []
+
+      # Через две минуты условие держится больше минуты: оповещение
+      # в состоянии Firing, и видны его метки вместе с подставленными
+      # значениями шаблонов.
+      - eval_time: 2m
+        alertname: InstanceDown
+        exp_alerts:
+          - labels:
+              alertname: InstanceDown
+              severity: critical
+              job: node
+              instance: 10.0.2.11:9100
+              env: lab
+            annotations:
+              summary: «Цель 10.0.2.11:9100 недоступна»
+              description: >-
+                Задание node не собирает метрики с 10.0.2.11:9100
+                больше минуты. Значение up: 0. Проверьте, работает ли
+                экспортёр и открыт ли порт на машине.
+
+      # Через пятнадцать минут обе цели отвечают. Условие up == 0
+      # ложно, оповещения нет.
+      - eval_time: 15m
+        alertname: InstanceDown
+        exp_alerts: []
+
+  # Второе правило: мало свободной памяти.
+  # Отношение свободной памяти к общей всё время равно 0.05, то есть
+  # меньше 0.1. Выдержка for: 5m отсчитывается от первой точки.
+  - interval: 15s
+    input_series:
+      - series: 'node_memory_MemAvailable_bytes{job="node", instance="10.0.2.13:9100"}'
+        values: '512000000x80'
+      - series: 'node_memory_MemTotal_bytes{job="node", instance="10.0.2.13:9100"}'
+        values: '10240000000x80'
+
+    alert_rule_test:
+      - eval_time: 2m
+        alertname: HostOutOfMemory
+        exp_alerts: []
+
+      - eval_time: 10m
+        alertname: HostOutOfMemory
+        exp_alerts:
+          - labels:
+              alertname: HostOutOfMemory
+              severity: warning
+              job: node
+              instance: 10.0.2.13:9100
+              env: lab
+            annotations:
+              summary: «Мало свободной памяти на 10.0.2.13:9100»
+              description: >-
+                Свободной памяти меньше 10 процентов от общей больше
+                пяти минут. Текущее отношение: 0.05.
+
+  # Третье правило: диск заполнится в ближайшие четыре часа.
+  # Свободного места 10 ГБ, и каждую минуту становится на 100 МБ
+  # меньше: 100 мегабайт в минуту — это 6 ГБ в час. Через час ряда
+  # объём свободного места уменьшится с 10 ГБ до 4 ГБ.
+  #
+  # Отсюда прогноз: за следующие четыре часа освободится ещё 24 ГБ,
+  # а в наличии только 4 ГБ. predict_linear даёт минус 20 ГБ, то есть
+  # отрицательное число.
+  - interval: 15s
+    input_series:
+      # Имя ряда целиком длинное, поэтому оно свёрнуто в YAML-блок:
+      # переносы внутри блока склеиваются в одну строку с пробелами,
+      # и это ровно те же метки, что пришли бы от node_exporter.
+      - series: >-
+          node_filesystem_avail_bytes{job="node", instance="10.0.2.13:9100",
+          mountpoint="/", device="/dev/sda1", fstype="ext4"}
+        values: '10000000000-100000000x80'
+
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: DiskWillFillIn4Hours
+        exp_alerts: []
+
+      - eval_time: 1h
+        alertname: DiskWillFillIn4Hours
+        exp_alerts:
+          - labels:
+              alertname: DiskWillFillIn4Hours
+              severity: warning
+              job: node
+              instance: 10.0.2.13:9100
+              mountpoint: /
+              device: /dev/sda1
+              fstype: ext4
+              env: lab
+            annotations:
+              summary: >-
+                Диск / на 10.0.2.13:9100 заполнится в ближайшие
+                четыре часа
+              description: >-
+                Линейный прогноз по последнему часу даёт отрицательный
+                остаток. Значение прогноза: -20000000000.
+
+  # Четвёртое правило: сторожевой пёс. Он не зависит ни от каких
+  # входных рядов, потому что выражение vector(1) само создаёт ряд.
+  # Поэтому входных рядов здесь нет вообще — и это тоже часть урока:
+  # оповещение, у которого нет условий, сломать данными невозможно,
+  # а вот сломать доставку — несложно.
+  - interval: 15s
+    input_series: []
+
+    alert_rule_test:
+      - eval_time: 30s
+        alertname: Watchdog
+        exp_alerts: []
+
+      - eval_time: 2m
+        alertname: Watchdog
+        exp_alerts:
+          - labels:
+              alertname: Watchdog
+              severity: none
+            annotations:
+              summary: «Сторожевой пёс: цепочка оповещения жива»
+              description: >-
+                Это оповещение горит всегда. Если оно перестало
+                приходить, сломалась доставка, а не состояние стенда.

@@ -1,0 +1,74 @@
+# Эталонная итоговая конфигурация трека «3 дня».
+# Всё, что собрано в практиках 1-9: сам Prometheus, четыре машины
+# с node_exporter, экспортёры сервисов, правила и Alertmanager.
+# Задания blackbox_http и pushgateway сюда не входят: они появляются
+# в практике 12 трека «5 дней».
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: lab
+    monitor: prometheus-01
+    host: mon
+
+rule_files:
+  - '/etc/prometheus/rules/*.yml'
+
+storage:
+  tsdb:
+    retention:
+      time: 15d
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - 'localhost:9093'
+
+scrape_configs:
+  # Сам Prometheus. Единственное задание без метки env: внешние метки
+  # всё равно добавят её к каждому ряду.
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  # Четыре Linux-машины стенда: mon, web1, db1, app1.
+  - job_name: 'node'
+    static_configs:
+      - targets:
+          - '10.0.2.5:9100'
+          - '10.0.2.11:9100'
+          - '10.0.2.12:9100'
+          - '10.0.2.13:9100'
+        labels:
+          env: lab
+
+  # nginx на web1: экспортёр читает stub_status на порту 8081.
+  - job_name: 'nginx'
+    static_configs:
+      - targets: ['10.0.2.11:9113']
+        labels:
+          env: lab
+
+  # PostgreSQL на db1.
+  - job_name: 'postgres'
+    static_configs:
+      - targets: ['10.0.2.12:9187']
+        labels:
+          env: lab
+
+  # Контейнеры на app1: cAdvisor.
+  - job_name: 'docker'
+    static_configs:
+      - targets: ['10.0.2.13:8080']
+        labels:
+          env: lab
+
+  # Windows-машина необязательна: если win1 в стенде нет, это задание
+  # даст DOWN, и это правильное поведение, а не поломка.
+  - job_name: 'windows'
+    static_configs:
+      - targets: ['10.0.2.21:9182']
+        labels:
+          env: lab

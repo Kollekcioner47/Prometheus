@@ -1,0 +1,42 @@
+[
+  {
+    "targets": [
+      "10.0.2.5:9100"
+    ],
+    "labels": {
+      "env": "lab",
+      "host": "mon",
+      "role": "monitoring"
+    }
+  },
+  {
+    "targets": [
+      "10.0.2.11:9100"
+    ],
+    "labels": {
+      "env": "lab",
+      "host": "web1",
+      "role": "web"
+    }
+  },
+  {
+    "targets": [
+      "10.0.2.12:9100"
+    ],
+    "labels": {
+      "env": "lab",
+      "host": "db1",
+      "role": "database"
+    }
+  },
+  {
+    "targets": [
+      "10.0.2.13:9100"
+    ],
+    "labels": {
+      "env": "lab",
+      "host": "app1",
+      "role": "application"
+    }
+  }
+]

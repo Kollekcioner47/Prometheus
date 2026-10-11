@@ -1,0 +1,158 @@
+{
+  "title": "Состояние парка",
+  "uid": "lab-fleet-state",
+  "tags": ["lab", "prometheus-course"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "editable": true,
+  "refresh": "1m",
+  "time": {
+    "from": "now-3h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Экземпляр",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": {
+          "query": "label_values(up, instance)",
+          "refId": "lab-instance"
+        },
+        "refresh": 1,
+        "sort": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "selected": true,
+          "text": ["All"],
+          "value": ["$__all"]
+        }
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Доступность целей",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "up{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}",
+          "instant": true
+        }
+      ],
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "noValue": "нет данных",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Загрузка CPU, %",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "100 - (avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\", instance=~\"$instance\"}[5m])) * 100)",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Свободное место, байт",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "node_filesystem_avail_bytes{instance=~\"$instance\", fstype!~\"tmpfs|squashfs|overlay|ramfs\", mountpoint=\"/\"}",
+          "legendFormat": "{{instance}} {{mountpoint}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "min": 0,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Свободная память, %",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "prometheus" },
+          "expr": "100 * node_memory_MemAvailable_bytes{instance=~\"$instance\"} / node_memory_MemTotal_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true },
+        "tooltip": { "mode": "multi", "sort": "desc" }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percent",
+          "min": 0,
+          "max": 100,
+          "custom": { "drawStyle": "line", "lineWidth": 1, "fillOpacity": 10 }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

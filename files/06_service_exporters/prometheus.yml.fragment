@@ -1,0 +1,45 @@
+# files/06_service_exporters/prometheus.yml.fragment
+#
+# ЭТО ФРАГМЕНТ, А НЕ ЦЕЛЫЙ КОНФИГУРАЦИОННЫЙ ФАЙЛ.
+# Он не запускается сам по себе и promtool его отдельно не читает.
+# Здесь только три задания из секции scrape_configs, которые
+# добавляются в /etc/prometheus/prometheus.yml на машине mon
+# к уже существующим заданиям prometheus, node и docker.
+#
+# Секции global в файле нет: интервал сбора 15s, срок хранения 15d
+# и внешние метки env=lab, monitor=prometheus-01, host=<имя хоста>
+# уже заданы в prometheus.yml с практики 2 и здесь не повторяются.
+#
+# Отступы важны: задания — элементы списка scrape_configs,
+# поэтому каждая строка «- job_name» начинается с двух пробелов.
+
+scrape_configs:
+
+  # Метрики nginx с web1. Их отдаёт nginx-prometheus-exporter,
+  # который читает страницу stub_status на порту 8081.
+  - job_name: nginx
+    static_configs:
+      - targets:
+          - 10.0.2.11:9113
+        labels:
+          env: lab
+
+  # Метрики PostgreSQL с db1. Собирает postgres_exporter,
+  # запущенный от учётной записи postgres.
+  - job_name: postgres
+    static_configs:
+      - targets:
+          - 10.0.2.12:9187
+        labels:
+          env: lab
+
+  # Метрики Windows с необязательной машины win1.
+  # windows_exporter слушает порт 9182.
+  # Если машины win1 на стенде нет, это задание не добавляется:
+  # цель в состоянии DOWN ничего не проверяет и только мешает.
+  - job_name: windows
+    static_configs:
+      - targets:
+          - 10.0.2.21:9182
+        labels:
+          env: lab

@@ -1,0 +1,104 @@
+# Что не попадает в репозиторий курса.
+#
+# Смысл файла не в том, чтобы «было чисто», а в том, чтобы учебные
+# пароли, токены ботов, ключи подписи и данные мониторинга не уехали
+# вместе с материалами. В курсе есть практики про секреты
+# Alertmanager, про доступ к базе данных, про обратный прокси
+# с паролем и про удаление групп из Pushgateway.
+
+# Данные Prometheus (TSDB) и Alertmanager. Это десятки гигабайт
+# и у каждого студента свои. Восстанавливаются из конфигурации,
+# а не из репозитория: см. files/15_operations/backup_restore.md.
+data/
+wal/
+chunks_head/
+*.tsdb
+prometheus-data/
+
+# Ключ подписи репозитория Grafana (практика 5). Приносится файлом
+# на стенд и в репозитории курса не хранится.
+gpg.key
+*.gpg
+*.asc
+grafana.gpg.key
+
+# Основной файл паролей Grafana и его резервные копии.
+grafana.db
+grafana.db.*
+/etc/grafana/grafana.ini.bak
+
+# Файлы с секретами Alertmanager: токен бота, пароль SMTP.
+# Образец с учебными заглушками лежит в files/09_alertmanager/
+# и версионируется.
+alertmanager.secret.yml
+*secret*.yml
+!files/**
+
+# Файл bcrypt-хеша для обратного прокси (практика 15).
+# В курсе лежит учебный web.yml, рабочий — не версионируется.
+.htpasswd
+*.htpasswd
+web.prod.yml
+
+# Ключи и сертификаты для TLS.
+*.key
+*.pem
+*.crt
+*.p12
+*.csr
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+.ssh/
+
+# Виртуальное окружение Python для собственного экспортёра
+# (практика 13). Весит сотни мегабайт и у каждого своё.
+.venv/
+venv/
+lab-exporter-venv/
+env/
+
+# Кэш и служебные каталоги Python.
+__pycache__/
+*.pyc
+.pytest_cache/
+.mypy_cache/
+
+# Загруженные дистрибутивы и распакованные каталоги: сотни мегабайт,
+# скачиваются заново командой wget из практики.
+distr/
+prometheus-*/
+alertmanager-*/
+node_exporter-*/
+blackbox_exporter-*/
+pushgateway-*/
+*.tar.gz
+*.tgz
+*.zip
+*.deb
+*.rpm
+*.msi
+
+# Резервные копии конфигурации (практика 15) и результаты проверок.
+backup/
+prometheus-conf-*.tar.gz
+*.bak
+*.orig
+*~
+
+# Журналы, дампы API и отчёты: удобно держать рядом с практикой,
+# незачем версионировать.
+*.log
+*.out
+report-*.txt
+api-*.json
+targets-*.json
+metric-*.prom
+
+# Локальные файлы с рабочими адресами.
+# Учебный список целей лежит в files/11_service_discovery/targets/
+# и версионируется.
+targets.local.json
+targets.prod.json
+hosts.prod

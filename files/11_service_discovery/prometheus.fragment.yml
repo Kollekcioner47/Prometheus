@@ -1,0 +1,60 @@
+# Фрагмент scrape_configs из /etc/prometheus/prometheus.yml.
+# Это не полная конфигурация Prometheus: только scrape_configs.
+# Глобальные настройки (scrape_interval, external_labels)
+# и раздел alerting остаются в prometheus.yml.
+
+scrape_configs:
+
+  # Сам Prometheus. Цель одна и меняется редко, поэтому
+  # здесь осознанно оставлен статический список.
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  # Машины стенда. Список целей ведёт файл, а не конфигурация:
+  # добавить машину можно, не перезапуская Prometheus.
+  - job_name: node
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.json
+        refresh_interval: 30s
+    relabel_configs:
+      # Роль цели становится меткой job. Цели с другой ролью
+      # метку не меняют: правило срабатывает только на node.
+      - source_labels: [role]
+        regex: node
+        target_label: job
+        replacement: node
+      # Временная метка нужна только внутри перемаркировки:
+      # имя с двумя подчёркиваниями в ряд не попадает.
+      - source_labels: [__address__]
+        regex: (.+):([0-9]+)
+        target_label: __tmp_port
+        replacement: $2
+      # Порт из адреса становится обычной меткой.
+      - source_labels: [__tmp_port]
+        target_label: exporter_port
+        replacement: $1
+
+  # Задание для проверок, которое показывает действие keep.
+  # В рабочей конфигурации такое задание не нужно: оно здесь,
+  # чтобы увидеть разницу между «цель есть» и «цель собирается».
+  - job_name: node_filtered
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/targets/*.json
+        refresh_interval: 30s
+    relabel_configs:
+      # Оставить только машины с ролью node. Остальные цели
+      # не будут опрошены вообще, хотя и останутся видны
+      # на странице Service Discovery.
+      - source_labels: [role]
+        regex: node
+        action: keep
+    # Сокращение объёма: служебные разделы файловых систем
+    # не нужны ни в одном запросе курса.
+    metric_relabel_configs:
+      - source_labels: [fstype]
+        regex: squashfs|iso9660|tmpfs
+        action: drop

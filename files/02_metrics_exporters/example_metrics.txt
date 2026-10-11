@@ -1,0 +1,58 @@
+# HELP go_gc_duration_seconds A summary of the wall-time pause (stop-the-world) duration in garbage collection cycles.
+# TYPE go_gc_duration_seconds summary
+go_gc_duration_seconds{quantile="0"} 3.8204e-05
+go_gc_duration_seconds{quantile="0.25"} 5.1207e-05
+go_gc_duration_seconds{quantile="0.5"} 6.3501e-05
+go_gc_duration_seconds{quantile="0.75"} 8.9019e-05
+go_gc_duration_seconds{quantile="1"} 0.000214683
+go_gc_duration_seconds_sum 0.001743321
+go_gc_duration_seconds_count 27
+# HELP node_boot_time_seconds Unix time of the last boot of the node.
+# TYPE node_boot_time_seconds gauge
+node_boot_time_seconds 1.774253216e+09
+# HELP node_cpu_seconds_total Seconds the CPUs spent in each mode.
+# TYPE node_cpu_seconds_total counter
+node_cpu_seconds_total{cpu="0",mode="idle"} 48213.47
+node_cpu_seconds_total{cpu="0",mode="iowait"} 96.21
+node_cpu_seconds_total{cpu="0",mode="system"} 1258.94
+node_cpu_seconds_total{cpu="0",mode="user"} 2944.18
+node_cpu_seconds_total{cpu="1",mode="idle"} 48102.09
+node_cpu_seconds_total{cpu="1",mode="iowait"} 71.55
+node_cpu_seconds_total{cpu="1",mode="system"} 1231.77
+node_cpu_seconds_total{cpu="1",mode="user"} 2907.63
+# HELP node_exporter_build_info A metric with a constant '1' value labeled by version, revision, branch, goversion from which node_exporter was built, and the goos and goarch for the build.
+# TYPE node_exporter_build_info gauge
+node_exporter_build_info{branch="HEAD",goarch="amd64",goos="linux",goversion="go1.24.5",revision="b1a2c3d4e5f6",tags="unknown",version="1.12.1"} 1
+# HELP node_filesystem_avail_bytes Filesystem space available to non-root users in bytes.
+# TYPE node_filesystem_avail_bytes gauge
+node_filesystem_avail_bytes{device="/dev/sda2",fstype="ext4",mountpoint="/"} 2.61823488e+10
+node_filesystem_avail_bytes{device="/dev/sdb1",fstype="ext4",mountpoint="/srv"} 8.39213056e+09
+node_filesystem_avail_bytes{device="tmpfs",fstype="tmpfs",mountpoint="/run"} 1.610612736e+09
+# HELP node_load1 1m load average.
+# TYPE node_load1 gauge
+node_load1 0.14
+# HELP node_memory_MemAvailable_bytes Memory information field MemAvailable_bytes.
+# TYPE node_memory_MemAvailable_bytes gauge
+node_memory_MemAvailable_bytes 2.913452032e+09
+# HELP node_network_receive_bytes_total Network device statistic receive_bytes.
+# TYPE node_network_receive_bytes_total counter
+node_network_receive_bytes_total{device="ens3"} 1.284592317e+08
+node_network_receive_bytes_total{device="lo"} 4.712338e+06
+# HELP node_network_transmit_bytes_total Network device statistic transmit_bytes.
+# TYPE node_network_transmit_bytes_total counter
+node_network_transmit_bytes_total{device="ens3"} 4.9182372e+07
+node_network_transmit_bytes_total{device="lo"} 4.712338e+06
+# HELP node_scrape_collector_duration_seconds node_exporter: Duration of a collector scrape.
+# TYPE node_scrape_collector_duration_seconds gauge
+node_scrape_collector_duration_seconds{collector="cpu"} 0.0042713
+node_scrape_collector_duration_seconds{collector="filesystem"} 0.0091852
+node_scrape_collector_duration_seconds{collector="memory"} 0.0013284
+node_scrape_collector_duration_seconds{collector="network"} 0.0075201
+# HELP node_time_seconds System time in seconds since epoch (1970).
+# TYPE node_time_seconds gauge
+node_time_seconds 1.774279481e+09
+# HELP promhttp_metric_handler_requests_total Total number of scrapes by HTTP status code.
+# TYPE promhttp_metric_handler_requests_total counter
+promhttp_metric_handler_requests_total{code="200"} 63
+promhttp_metric_handler_requests_total{code="500"} 0
+promhttp_metric_handler_requests_total{code="503"} 0

@@ -1,0 +1,40 @@
+# /etc/systemd/system/postgres_exporter.service
+#
+# Ставится на db1 (10.0.2.12).
+# Служба отдаёт метрики PostgreSQL на порту 9187.
+# Файл кладётся в /etc/systemd/system/, дальше systemctl daemon-reload.
+
+[Unit]
+Description=Prometheus exporter for PostgreSQL
+Documentation=https://github.com/prometheus-community/postgres_exporter
+Wants=network-online.target
+After=network-online.target postgresql.service
+
+[Service]
+Type=simple
+
+# Учётная запись postgres, а не root. Она совпадает с владельцем
+# сокета UNIX и с ролью в базе данных, поэтому экспортёру
+# не нужен ни пароль, ни отдельные права.
+User=postgres
+Group=postgres
+
+# Строка подключения живёт в Environment, а не в ExecStart.
+# Причина простая: /etc/systemd/system/postgres_exporter.service
+# читают все, у кого есть доступ к машине, а вывод ps aux
+# и истории команд — тем более. Подключение через локальный
+# сокет /var/run/postgresql/ означает аутентификацию peer:
+# роль в базе определяется по имени пользователя ОС.
+Environment=DATA_SOURCE_NAME=user=postgres host=/var/run/postgresql/ sslmode=disable
+
+ExecStart=/usr/local/bin/postgres_exporter \
+    --web.listen-address=:9187
+
+Restart=on-failure
+RestartSec=5s
+
+NoNewPrivileges=true
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

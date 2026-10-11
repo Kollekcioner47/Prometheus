@@ -1,0 +1,27 @@
+# Пример формата exposition, собранный руками через printf.
+# Это не вывод app.py, а то, что мы набрали сами в шаге 2,
+# чтобы увидеть формат до того, как его начнёт отдавать библиотека.
+#
+# HELP — одна строка человеческого текста, до первой строки метрики.
+# TYPE — ровно одно из: counter, gauge, histogram, summary, untyped.
+# Строка образца: имя, метки в фигурных скобках, значение в конце.
+# Значение у строки # TYPE не пишется, а у # HELP пишется текстом.
+
+# HELP lab_queue_depth Сколько разовых заданий ждёт обработки
+# TYPE lab_queue_depth gauge
+lab_queue_depth 7
+
+# HELP lab_job_duration_seconds Время одного задания
+# TYPE lab_job_duration_seconds histogram
+lab_job_duration_seconds_bucket{le="0.5"} 0
+lab_job_duration_seconds_bucket{le="1.0"} 2
+lab_job_duration_seconds_bucket{le="2.5"} 5
+lab_job_duration_seconds_bucket{le="5.0"} 9
+lab_job_duration_seconds_bucket{le="10.0"} 14
+lab_job_duration_seconds_bucket{le="30.0"} 18
+lab_job_duration_seconds_bucket{le="60.0"} 19
+lab_job_duration_seconds_bucket{le="120.0"} 20
+lab_job_duration_seconds_bucket{le="300.0"} 20
+lab_job_duration_seconds_bucket{le="+Inf"} 20
+lab_job_duration_seconds_sum 118.4
+lab_job_duration_seconds_count 20

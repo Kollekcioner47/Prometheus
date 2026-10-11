@@ -1,0 +1,21 @@
+[Unit]
+Description=Prometheus Pushgateway
+Documentation=https://github.com/prometheus/pushgateway
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=pushgateway
+Group=pushgateway
+Type=simple
+ExecStart=/usr/local/bin/pushgateway \
+    --web.listen-address=:9091 \
+    --web.enable-admin-api
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

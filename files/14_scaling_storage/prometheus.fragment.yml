@@ -1,0 +1,83 @@
+# Фрагмент конфигурации Prometheus: хранение и удалённая запись.
+#
+# Это ФРАГМЕНТ, а не prometheus.yml целиком: глобальные настройки,
+# задания и правила на стенде уже есть с практики 2. Скопируйте
+# из файла только нужные блоки.
+#
+# Заполнители вида <VM_HOST> заполняются осознанно: в курсе нет
+# ни одной развёрнутой VictoriaMetrics, поэтому адрес надо подставить
+# свой. Заполнитель виден глазом и не даёт скопировать блок, не думая.
+
+# ХРАНЕНИЕ. Срок хранения задаётся здесь, в конфигурации, а место
+# хранения — флагом --storage.tsdb.path в юнит-файле службы.
+#
+# Флаги --storage.tsdb.retention.time и --storage.tsdb.retention.size
+# в версии 3.15.0 помечены как устаревшие: в справке prometheus
+# --help рядом с ними стоит [DEPRECATED] и сказано использовать поля
+# конфигурации. Работать они пока работают, но в курсе хранение
+# живёт в prometheus.yml — так его видно в git и он восстанавливается
+# из резервной копии вместе с остальными файлами.
+storage:
+  tsdb:
+    retention:
+      time: 15d
+      # size: 20GB — второй предел, по объёму. Действует одновременно
+      # с первым: данные удаляются, когда сработал любой из них.
+      # Считаются только блоки, журнал WAL в этот объём не входит.
+
+# Отправка метрик в отдалённое хранилище. Ниже — блок для
+# VictoriaMetrics: она принимает remote write на /api/v1/write.
+remote_write:
+  - url: http://<VM_HOST>:8428/api/v1/write
+    name: victoriametrics-lab
+    remote_timeout: 30s
+
+    # Очередь на отправку. Настраивается тогда, когда есть замер:
+    # по умолчанию Prometheus шлёт 5000 образцов за раз и держит
+    # до 10000 незавершённых запросов.
+    queue_config:
+      capacity: 10000
+      max_shards: 200
+      min_shards: 1
+      max_samples_per_send: 2000
+      batch_send_deadline: 5s
+      min_backoff: 30ms
+      max_backoff: 5s
+
+    # Что НЕ отправлять. Здесь отсекаются самые тяжёлые внутренние
+    # метрики Prometheus: они нужны локально для диагностики,
+    # но в отдалённом хранилище занимают место без пользы.
+    write_relabel_configs:
+      - source_labels: [__name__]
+        regex: 'prometheus_tsdb_.*|go_.*|net_conntrack_.*'
+        action: drop
+      - source_labels: [__name__]
+        regex: 'lab_queue_depth|lab_job_duration_seconds.*|lab_batch_jobs_total'
+        action: keep
+
+# Альтернативные адреса для того же блока remote_write — чтобы
+# видеть, чем отличаются хранилища. Раскомментируется одно:
+#
+#   Thanos Receive:        http://<THANOS_RECEIVE>:19291/api/v1/receive
+#   Grafana Mimir:         http://<MIMIR_HOST>:9009/api/v1/push
+#   VictoriaMetrics:       http://<VM_HOST>:8428/api/v1/write
+#
+# С Thanos и Mimir обычно ставят ещё внешние метки, чтобы отдалённое
+# хранилище знало, какой экземпляр прислал ряд:
+#   external_labels:
+#     env: lab
+#     monitor: prometheus-01
+
+# Федерация настраивается не здесь, а на принимающей стороне:
+# второй Prometheus собирает /federate первого с параметром match[].
+# Пример задания для принимающего Prometheus:
+#
+#   - job_name: federate-from-mon
+#     honor_labels: true
+#     metrics_path: /federate
+#     params:
+#       'match[]':
+#         - '{job="node"}'
+#         - 'up{env="lab"}'
+#     static_configs:
+#       - targets: ['10.0.2.5:9090']

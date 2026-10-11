@@ -1,0 +1,218 @@
+# Юнит-тесты правил. Практика 16, шаг 5.
+#
+# Тест — это выдуманные ряды и утверждение о том, какие оповещения
+# обязаны появиться. Проверка синтаксиса ловит опечатку, но не
+# ловит правило, которое сформулировано неверно: правило, которое
+# истинно всегда, синтаксически безупречно.
+#
+# Запуск:
+#   cd /etc/prometheus
+#   promtool test rules rules/tests/rules.test.yml
+#
+# Часть «alert_rule_test» проверяет оповещения, часть
+# «promql_expr_test» — правила записи и обычные выражения.
+#
+# В файле девять тестов: по одному на каждое оповещение из
+# alerting.rules.yml и проверки правил записи. У каждого оповещения
+# есть тест ещё и на противоположный случай — когда условия нет
+# и оповещения быть не должно.
+
+rule_files:
+  - ../recording.rules.yml
+  - ../alerting.rules.yml
+
+evaluation_interval: 1m
+
+tests:
+  # 1. Машина недоступна. Достаточно одного ряда up == 0:
+  # именно так выглядит цель, до которой Prometheus не дошёл.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node", instance="10.0.2.11:9100", env="lab"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: InstanceDown
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: "10.0.2.11:9100"
+              job: node
+              env: lab
+            exp_annotations:
+              summary: "Цель 10.0.2.11:9100 недоступна"
+              description: >-
+                Задание node не отвечает больше двух минут.
+                Проверьте доступность цели и службу экспортёра.
+
+  # 2. Цель ожила: на третьей минуте оповещения быть не должно.
+  # Это вторая половина проверки — правило обязано и зажигаться,
+  # и гаснуть.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="node", instance="10.0.2.11:9100", env="lab"}'
+        values: '0x3 1x7'
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: InstanceDown
+        exp_alerts: []
+
+  # 3. Мало памяти: проверяется правило записи и правило
+  # оповещения вместе.
+  - interval: 1m
+    input_series:
+      - series: 'node_memory_MemTotal_bytes{instance="10.0.2.12:9100", job="node"}'
+        values: '4000000000x20'
+      - series: 'node_memory_MemAvailable_bytes{instance="10.0.2.12:9100", job="node"}'
+        values: '300000000x20'
+    promql_expr_test:
+      - expr: instance:node_memory_available:ratio
+        eval_time: 5m
+        exp_samples:
+          - labels: 'instance:node_memory_available:ratio{instance="10.0.2.12:9100", job="node"}'
+            value: 0.075
+    alert_rule_test:
+      - eval_time: 7m
+        alertname: HostOutOfMemory
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "10.0.2.12:9100"
+              job: node
+            exp_annotations:
+              summary: "Мало памяти на 10.0.2.12:9100"
+              description: >-
+                Свободно 7.5% памяти от общей. Разбираться нужно
+                до того, как придёт OOM.
+
+  # 4. Диск заполнен. Два раздела на одной машине: правило обязано
+  # сработать только на том, который перешёл порог.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{instance="10.0.2.13:9100", job="node", device="/dev/sda1", fstype="ext4", mountpoint="/"}'
+        values: '500000000x20'
+      - series: 'node_filesystem_size_bytes{instance="10.0.2.13:9100", job="node", device="/dev/sda1", fstype="ext4", mountpoint="/"}'
+        values: '20000000000x20'
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: HostOutOfDiskSpace
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: "10.0.2.13:9100"
+              job: node
+              device: "/dev/sda1"
+              fstype: ext4
+              mountpoint: "/"
+            exp_annotations:
+              summary: "Диск /dev/sda1 на 10.0.2.13:9100 заполнен"
+              description: "Занято 97.5% раздела."
+
+  # 5. Внешняя проверка не проходит. Здесь видно, что blackbox
+  # и цель живут в разных заданиях, и метка instance у них разная.
+  - interval: 1m
+    input_series:
+      - series: 'probe_success{instance="http://10.0.2.11", job="blackbox_http", module="http_2xx"}'
+        values: '0x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: BlackboxProbeFailed
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              instance: "http://10.0.2.11"
+              job: blackbox_http
+              module: http_2xx
+            exp_annotations:
+              summary: "Проверка http://10.0.2.11 не проходит"
+              description: "Модуль http_2xx вернул отказ."
+
+  # 6. Сторожевой пёс горит всегда. Если этот тест проходит,
+  # правило на месте; если оповещения нет в Alertmanager —
+  # дело не в правиле.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="prometheus", instance="localhost:9090"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: LabWatchdog
+        exp_alerts:
+          - exp_labels:
+              severity: info
+            exp_annotations:
+              summary: "Цепочка оповещений жива"
+              description: >-
+                Это оповещение горит всегда. Если оно пропало,
+                сломан канал доставки.
+
+  # 7. Свой экспортёр из практики 13: очередь растёт, заданий
+  # не выполняется. Проверяется правило на своих метриках.
+  - interval: 1m
+    input_series:
+      - series: 'lab_queue_depth{job="lab_exporter", instance="10.0.2.13:9200"}'
+        values: '150x25'
+      - series: 'lab_batch_jobs_total{job="lab_exporter", instance="10.0.2.13:9200"}'
+        values: '0x25'
+    promql_expr_test:
+      - expr: job:lab_queue_depth:avg5m
+        eval_time: 10m
+        exp_samples:
+          - labels: 'job:lab_queue_depth:avg5m{job="lab_exporter", instance="10.0.2.13:9200"}'
+            value: 150
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: LabExporterQueueStuck
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              job: lab_exporter
+              instance: "10.0.2.13:9200"
+            exp_annotations:
+              summary: "Очередь своего экспортёра не разбирается"
+              description: >-
+                Глубина очереди 150, при этом заданий
+                не выполняется.
+
+  # 8. Сертификат истекает: до даты осталось меньше 14 дней.
+  # Ряд задан константой 1, а time() растёт вместе с eval_time,
+  # поэтому к десятой минуте разность становится отрицательной.
+  # Так проверяется само условие, а не конкретная дата.
+  - interval: 1m
+    input_series:
+      - series: 'probe_ssl_earliest_cert_expiry{instance="https://prometheus.io", job="blackbox_http", module="http_2xx"}'
+        values: '1x30'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: SSLCertificateExpiringSoon
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "https://prometheus.io"
+              job: blackbox_http
+              module: http_2xx
+            exp_annotations:
+              summary: "Сертификат https://prometheus.io истекает"
+  # 9. Диск заполнится в ближайшие часы. Ряд убывает линейно,
+  # поэтому predict_linear даёт отрицательное значение. Величины
+  # взяты круглыми: 2e9 байт минус 1e7 байт за минуту. Точное
+  # значение предсказания здесь не проверяется — проверяется,
+  # что правило сработало.
+  - interval: 1m
+    input_series:
+      - series: 'node_filesystem_avail_bytes{instance="10.0.2.13:9100", job="node", device="/dev/sda1", fstype="ext4", mountpoint="/"}'
+        values: '2000000000-10000000x100'
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: DiskWillFillIn4Hours
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              instance: "10.0.2.13:9100"
+              job: node
+              device: "/dev/sda1"
+              fstype: ext4
+              mountpoint: "/"
+            exp_annotations:
+              summary: "Диск /dev/sda1 на 10.0.2.13:9100 кончается"
+

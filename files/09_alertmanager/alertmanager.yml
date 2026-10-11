@@ -1,0 +1,117 @@
+# Учебная конфигурация Alertmanager 0.34.1 для стенда курса
+# «Мониторинг на Prometheus и Grafana». Разбирается в практике 9.
+#
+# ВНИМАНИЕ: все значения получателей — ЗАГЛУШКИ. Пароль SMTP, токен
+# бота и chat_id не настоящие. Настоящие секреты в конфигурации
+# не хранят: см. шаг 16 практики 9 и поля *_file ниже.
+
+global:
+  # Через сколько считать оповещение закрытым, если Prometheus
+  # перестал его присылать и не указал EndsAt.
+  resolve_timeout: 5m
+
+  # Почта. Сервера smtp.example.lab в стенде нет: это заглушка,
+  # чтобы было видно, какие поля нужны в работе.
+  smtp_smarthost: 'smtp.example.lab:587'
+  smtp_from: 'alertmanager@example.lab'
+  smtp_hello: 'mon'
+  smtp_auth_username: 'alertmanager@example.lab'
+  # ЗАГЛУШКА. Настоящий пароль — в файле с режимом 0600,
+  # владелец prometheus (шаг 16).
+  smtp_auth_password: 'ЗАГЛУШКА_ПАРОЛЬ_SMTP'
+  smtp_require_tls: true
+
+  # Telegram. Адрес API и токен по умолчанию для всех получателей.
+  telegram_api_url: 'https://api.telegram.org'
+  # ЗАГЛУШКА. Настоящий токен — в файле с режимом 0600,
+  # владелец prometheus (шаг 16).
+  telegram_bot_token: 'ЗАГЛУШКА_ТОКЕН_БОТА'
+
+# Каталог с шаблонами сообщений подключается шаблоном пути.
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+# Корень дерева маршрутов. Сюда попадает всё, что не поймал
+# ни один вложенный маршрут, поэтому получатель у корня обязателен.
+route:
+  receiver: 'webhook-uchebnyy'
+  group_by: ['alertname', 'env']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # 1. Критичное — дежурному в Telegram. Задержка на сбор группы
+    #    короче, повтор чаще: критичное ждать не должно.
+    - matchers:
+        - severity="critical"
+      receiver: 'telegram-duty'
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 1h
+      continue: false
+
+      routes:
+        # Вложенный маршрут: Watchdog горит всегда, дежурного
+        # он не будит и уходит только в учебный webhook.
+        - matchers:
+            - alertname="Watchdog"
+          receiver: 'webhook-uchebnyy'
+          continue: false
+
+    # 2. Предупреждения — письмом команде. Повтор редкий:
+    #    предупреждение о диске не должно приходить каждый час.
+    - matchers:
+        - severity="warning"
+      receiver: 'email-team'
+      group_wait: 1m
+      group_interval: 10m
+      repeat_interval: 12h
+      continue: false
+
+    # 3. Остальное (info, none) — в учебный webhook.
+    #    Оповещения вовсе без метки severity не попадут ни сюда,
+    #    ни в маршруты 1-2 и останутся у корня дерева.
+    - matchers:
+        - severity=~"info|none"
+      receiver: 'webhook-uchebnyy'
+      continue: false
+
+# Подавление: пока недоступна машина, про её диск и память
+# не сообщаем. Имена оповещений должны совпадать с файлом правил,
+# иначе правило подавления молча не сработает никогда.
+inhibit_rules:
+  - name: 'instance-down-mutes-its-own-alerts'
+    source_matchers:
+      - alertname="InstanceDown"
+    target_matchers:
+      - alertname=~"HostOutOfMemory|HostDiskSpaceLow|DiskWillFillIn4Hours"
+    equal: ['instance']
+
+receivers:
+  # Учебный получатель: HTTP POST на слушатель, поднятый на mon.
+  - name: 'webhook-uchebnyy'
+    webhook_configs:
+      - url: 'http://10.0.2.5:9095/alerts'
+        send_resolved: true
+        max_alerts: 20
+
+  - name: 'email-team'
+    email_configs:
+      - to: 'team@example.lab'
+        from: 'alertmanager@example.lab'
+        smarthost: 'smtp.example.lab:587'
+        auth_username: 'alertmanager@example.lab'
+        auth_password: 'ЗАГЛУШКА_ПАРОЛЬ_SMTP'
+        require_tls: true
+        send_resolved: true
+        headers:
+          Subject: '{{ template "email.subject" . }}'
+
+  - name: 'telegram-duty'
+    telegram_configs:
+      # ЗАГЛУШКА: отрицательный chat_id — это группа, а не человек.
+      - chat_id: -1001234567890
+        parse_mode: 'HTML'
+        send_resolved: true
+        message: '{{ template "telegram.message" . }}'

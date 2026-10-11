@@ -1,0 +1,41 @@
+# /etc/systemd/system/nginx_exporter.service
+#
+# Ставится на web1 (10.0.2.11).
+# Служба отдаёт метрики nginx на порту 9113 для Prometheus с mon.
+# Файл кладётся в /etc/systemd/system/, после чего нужен
+# systemctl daemon-reload: без него systemd о новом файле не знает.
+
+[Unit]
+Description=Prometheus exporter for nginx
+Documentation=https://github.com/nginxinc/nginx-prometheus-exporter
+Wants=network-online.target
+After=network-online.target nginx.service
+
+[Service]
+Type=simple
+
+# Отдельная системная учётная запись без домашнего каталога
+# и без оболочки. Экспортёру нечего писать на диск и незачем
+# иметь право входа в систему.
+User=nginx_exporter
+Group=nginx_exporter
+
+# Адрес страницы stub_status. Ключ -nginx.scrape-uri указывается
+# именно в таком виде: точка в имени ключа — часть формата.
+# Служба ходит на localhost, поэтому правило allow 127.0.0.1
+# из stats.conf её пропускает.
+ExecStart=/usr/local/bin/nginx-prometheus-exporter \
+    -nginx.scrape-uri=http://127.0.0.1:8081/server-status \
+    -web.listen-address=:9113
+
+Restart=on-failure
+RestartSec=5s
+
+# Ограничения: экспортёру достаточно сетевого доступа,
+# файловая система ему не нужна вовсе.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+
+[Install]
+WantedBy=multi-user.target

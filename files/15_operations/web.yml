@@ -1,0 +1,35 @@
+# Файл веб-конфигурации Prometheus и Alertmanager.
+#
+# Подключается флагом в юнит-файле службы:
+#   --web.config.file=/etc/prometheus/web.yml
+# у Prometheus и
+#   --web.config.file=/etc/alertmanager/web.yml
+# у Alertmanager. Формат у обоих одинаковый.
+#
+# Что здесь есть и чего здесь нет.
+#
+# ЕСТЬ: basic_auth_users — проверка пароля на самом Prometheus.
+# НЕТ TLS: шифрование канала и сертификат делает nginx из файла
+# nginx/prometheus.conf, который стоит перед Prometheus.
+# Prometheus слушает только localhost (--web.listen-address=
+# 127.0.0.1:9090), и наружу его порт не смотрит вообще. Ставить
+# TLS ещё и здесь незачем: между nginx и Prometheus трафик
+# не покидает машину.
+#
+# Если Prometheus слушает не localhost, а сеть, TLS нужен и в этом
+# файле — блоком tls_server_config с cert_file и key_file.
+# В курсе выбран вариант с прокси, и это объясняется в практике 15.
+#
+# ХЕШ НИЖЕ — УЧЕБНЫЙ. Он соответствует паролю Console47, который
+# опубликован в методике курса и напечатан в практике открытым
+# текстом. В рабочей среде хеш в репозиторий не попадает: файл
+# с ним лежит в секретах и раздаётся системой управления
+# конфигурацией. Сменить пароль:
+#   htpasswd -B -C 12 /etc/prometheus/web.yml engineer
+# Ключ -B задаёт bcrypt, -C 12 — стоимость. Обе величины
+# в рабочей среде выбирают осознанно: bcrypt считается медленно
+# намеренно, и стоимость 14 на слабой машине заметна на каждом
+# запросе.
+
+basic_auth_users:
+  engineer: $2y$12$i0J3nqLd7YbQyf4WcT8O1uXm5sRkpHvZaE6gN2wMjVtC9dBxSFhqe

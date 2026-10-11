@@ -1,0 +1,28 @@
+# Настройки yamllint для конфигураций мониторинга.
+#
+# Задача этой проверки — синтаксис, а не стиль. Поэтому правила,
+# которые ловят настоящие поломки (табы, дубли ключей, отступы),
+# оставлены включёнными, а требования к длине строк ослаблены:
+# команды и выражения PromQL в правилах переносить вредно.
+
+extends: default
+
+rules:
+  line-length:
+    max: 120
+    allow-non-breakable-words: true
+  comments:
+    min-spaces-from-content: 1
+  comments-indentation: disable
+  document-start: disable
+  braces:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+  brackets:
+    min-spaces-inside: 0
+    max-spaces-inside: 1
+  indentation:
+    spaces: 2
+    indent-sequences: consistent
+  truthy:
+    allowed-values: ["true", "false"]

@@ -1,0 +1,62 @@
+# files/08_rules/recording.rules.yml
+#
+# Правила записи курса. Подключаются в prometheus.yml через rule_files:
+#
+#   rule_files:
+#     - /etc/prometheus/rules/*.yml
+#
+# Файл кладётся в /etc/prometheus/rules/:
+#
+#   sudo install -o prometheus -g prometheus -m 0644 \
+#       recording.rules.yml /etc/prometheus/rules/recording.rules.yml
+#
+# Проверка перед перезагрузкой конфигурации:
+#
+#   promtool check rules /etc/prometheus/rules/recording.rules.yml
+#
+# Правило записи состоит из трёх полей: record — имя нового ряда,
+# expr — выражение, labels — дополнительные метки к результату.
+# Поле record не должно совпадать с именем существующей метрики:
+# Prometheus откажется применять такую группу целиком, а не одно
+# правило из неё.
+
+groups:
+
+  # Имя группы видно на странице Rules в веб-интерфейсе Prometheus,
+  # поэтому оно названо по смыслу, а не "group1".
+  # interval задан явно и совпадает с evaluation_interval из global:
+  # так видно, что интервал вычисления можно задать отдельно группе,
+  # не трогая остальные правила.
+  - name: node_recording
+    interval: 15s
+    rules:
+
+      # Доля занятого процессорного времени на машине: 0 — простой,
+      # 1 — все ядра заняты. Считается как "единица минус доля
+      # простоя". range выбран 5m, а не 1m: на минуте при интервале
+      # сбора 15s в окне всего четыре точки, и ряд получается рваным.
+      #
+      # Имя построено по схеме level:metric:operations:
+      #   node — уровень агрегации (одна машина),
+      #   node_cpu — метрика-источник,
+      #   ratio — операция (отношение).
+      # Двоеточия в имени не украшение: они отделяют правило записи
+      # от обычной метрики экспортёра на глаз, и по ним же видно,
+      # что имя нельзя спутать с метрикой.
+      - record: job:node_cpu:ratio
+        expr: >-
+          1 - avg by (instance, job) (
+            rate(node_cpu_seconds_total{mode="idle"}[5m])
+          )
+        labels:
+          env: lab
+
+      # Свободная память в байтах: без этой записи выражение
+      # пришлось бы повторять в каждом правиле оповещения.
+      # Метка instance сохраняется: avg by (instance, job) её оставляет,
+      # а метка job нужна, потому что в стенде есть четыре цели node.
+      - record: instance:node_memory_available:bytes
+        expr: >-
+          node_memory_MemAvailable_bytes
+        labels:
+          env: lab

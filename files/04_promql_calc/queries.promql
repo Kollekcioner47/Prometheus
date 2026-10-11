@@ -1,0 +1,270 @@
+# files/04_promql_calc/queries.promql
+#
+# Все запросы практики 4 «PromQL: вычисления».
+# Файл справочный: Prometheus его не читает, promtool не проверяет.
+# Одна строка — одно выражение, и оно помещается в одну строку.
+# Копируется только строка запроса, без комментария после «# ».
+# Вставлять в поле Expression на странице http://10.0.2.5:9090.
+
+# ---------------------------------------------------------------------
+# ШАГ 3. АРИФМЕТИКА И НАСЛЕДОВАНИЕ МЕТОК
+# ---------------------------------------------------------------------
+
+# Свободная память в байтах: как её отдаёт node_exporter.
+node_memory_MemAvailable_bytes
+
+# Всего памяти в байтах. Метка instance отличает машины.
+node_memory_MemTotal_bytes
+
+# Занятая память: разность двух рядов с одинаковыми метками.
+node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes
+
+# Занятая память в мегабайтах (1024 * 1024 = 1048576).
+(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / 1048576
+
+# Занятая память в процентах. Сначала деление, потом умножение.
+(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / node_memory_MemTotal_bytes * 100
+
+# Сколько рядов вернул запрос: четыре машины — четыре ряда.
+count(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes)
+
+# Часы работы машины: time() — текущий момент в секундах.
+(time() - node_boot_time_seconds) / 3600
+
+# Свободное место на разделе в гигабайтах (1024^3).
+node_filesystem_avail_bytes / 1073741824
+
+# ---------------------------------------------------------------------
+# ШАГ 4. СОПОСТАВЛЕНИЕ ВЕКТОРОВ: on, ignoring, group_left
+# ---------------------------------------------------------------------
+
+# Два ряда с разными наборами меток: простое деление упадёт.
+node_filesystem_size_bytes
+node_filesystem_avail_bytes
+
+# ignoring убирает из сопоставления перечисленные метки.
+node_filesystem_avail_bytes / ignoring (env, host, monitor) node_filesystem_size_bytes
+
+# on оставляет для сопоставления только перечисленные метки.
+node_filesystem_avail_bytes / on (job) node_filesystem_size_bytes
+
+# group_left: рядов больше в левом векторе, дубли помечаются явно.
+node_filesystem_avail_bytes / ignoring (env, host, monitor) group_left node_filesystem_size_bytes
+
+# Пример, где дубли действительно есть: up по всем машинам
+# делится на одно число всего парка.
+up{env="lab"} / on () group_left sum(up{env="lab"})
+
+# group_right — зеркальный случай: рядов больше в правом векторе.
+up{env="lab"} + on (job) group_right node_filesystem_avail_bytes
+
+# ---------------------------------------------------------------------
+# ШАГ 5. АГРЕГАЦИЯ: sum, avg, min, max, count, stddev, by, without
+# ---------------------------------------------------------------------
+
+# Сколько всего рядов по режимам процессора (не ядер).
+count(node_cpu_seconds_total{mode="idle"})
+
+# Сколько ядер на каждой машине.
+count by (instance) (node_cpu_seconds_total{mode="idle"})
+
+# Сумма накопленного времени по всем режимам, одна строка на машину.
+sum by (instance) (node_cpu_seconds_total)
+
+# Доля занятого времени процессора в процентах.
+100 * (1 - sum by (instance) (node_cpu_seconds_total{mode="idle"}) / sum by (instance) (node_cpu_seconds_total))
+
+# Средняя, минимальная и максимальная загрузка по парку машин.
+avg(node_load1{env="lab"})
+min(node_load1{env="lab"})
+max(node_load1{env="lab"})
+
+# Разброс загрузки между машинами: среднее отклонение.
+stddev(node_load1{env="lab"})
+
+# Сколько машин видно в задании node.
+count(up{job="node"})
+
+# Сколько целей в каждом задании — сводка по всему стенду.
+count by (job) (up)
+
+# Две самые загруженные и две самые свободные машины.
+topk(2, node_load1{env="lab"})
+bottomk(2, node_load1{env="lab"})
+
+# topk по группам: по две файловые системы на каждой машине.
+topk(2, node_filesystem_avail_bytes) by (instance)
+
+# quantile вместо среднего: 0.95 и 0.5 (медиана).
+quantile(0.95, node_load1{env="lab"})
+quantile(0.5, node_load1{env="lab"})
+
+# Сколько раз встретилось каждое значение метки версии ядра.
+count_values("kernel", node_uname_info)
+
+# without убирает перечисленные метки и агрегирует по остальным.
+count without (cpu, mode) (node_cpu_seconds_total)
+
+# ---------------------------------------------------------------------
+# ШАГ 6. rate, irate, increase, delta, idelta, deriv, resets
+# ---------------------------------------------------------------------
+
+# «Сырой» счётчик процессорного времени: только растёт.
+node_cpu_seconds_total{mode="idle", instance="10.0.2.11:9100"}
+
+# Скорость роста счётчика: секунды простоя в секунду времени.
+rate(node_cpu_seconds_total{mode="idle"}[5m])
+
+# ВАЖНО: на первом сборе rate даёт не ноль, а пустой результат.
+# Нужны минимум две точки внутри окна.
+rate(node_cpu_seconds_total[1m])
+
+# irate берёт только две последние точки: резче и рванее.
+irate(node_cpu_seconds_total{mode="idle"}[5m])
+
+# increase — прирост за окно, а не скорость.
+increase(node_cpu_seconds_total{mode="idle"}[5m])
+
+# Скорость сети в байтах в секунду по каждому интерфейсу.
+rate(node_network_receive_bytes_total[5m])
+
+# delta — изменение gauge за окно; на счётчике бессмысленна.
+delta(node_memory_MemAvailable_bytes[5m])
+
+# idelta — разница между двумя последними точками gauge.
+idelta(node_memory_MemAvailable_bytes[1m])
+
+# deriv — скорость изменения gauge: байты в секунду.
+deriv(node_filesystem_avail_bytes{mountpoint="/"}[1h])
+
+# Сколько раз счётчик обнулился: перезапуски службы.
+resets(node_network_receive_bytes_total[1h])
+
+# ---------------------------------------------------------------------
+# ШАГ 7. ГОТОВЫЕ ПРАКТИЧЕСКИЕ ЗАПРОСЫ
+# ---------------------------------------------------------------------
+
+# Загрузка CPU в процентах — главный запрос практики.
+100 * (1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])))
+
+# Занятая память в процентах по каждой машине.
+100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+
+# Память в гигабайтах: занятая и вся.
+(node_memory_MemTotal_bytes - node_memory_MemAvailable_bytes) / 1073741824
+node_memory_MemTotal_bytes / 1073741824
+
+# Свободное место в процентах без служебных файловых систем.
+100 * node_filesystem_avail_bytes{fstype!~"tmpfs|devtmpfs|squashfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|devtmpfs|squashfs|overlay"}
+
+# Свободное место на корневых разделах в гигабайтах.
+node_filesystem_avail_bytes{mountpoint="/", fstype!="tmpfs"} / 1073741824
+
+# Скорость сети в мегабитах в секунду: приём и отдача.
+rate(node_network_receive_bytes_total{device!="lo"}[5m]) * 8 / 1e6
+rate(node_network_transmit_bytes_total{device!="lo"}[5m]) * 8 / 1e6
+
+# Время работы машины в днях и время работы Prometheus.
+(time() - node_boot_time_seconds) / 86400
+time() - process_start_time_seconds{job="prometheus"}
+
+# Операции ввода-вывода в секунду: чтение и запись.
+rate(node_disk_reads_completed_total[5m])
+rate(node_disk_writes_completed_total[5m])
+
+# ---------------------------------------------------------------------
+# ШАГ 8. ГИСТОГРАММЫ: _bucket, _sum, _count, histogram_quantile
+# ---------------------------------------------------------------------
+
+# Три части одной гистограммы: интервалы, сумма, количество.
+prometheus_http_request_duration_seconds_bucket
+prometheus_http_request_duration_seconds_sum
+prometheus_http_request_duration_seconds_count
+
+# Количество наблюдений за всё время работы Prometheus.
+prometheus_http_request_duration_seconds_count
+
+# Обязательная подготовка данных: агрегация sum by (le).
+sum by (le) (rate(prometheus_http_request_duration_seconds_bucket[5m]))
+
+# Девяносто пятый процентиль времени ответа.
+histogram_quantile(0.95, sum by (le) (rate(prometheus_http_request_duration_seconds_bucket[5m])))
+
+# Медиана времени ответа.
+histogram_quantile(0.5, sum by (le) (rate(prometheus_http_request_duration_seconds_bucket[5m])))
+
+# Среднее берётся из _sum и _count, а не из процентиля.
+sum(rate(prometheus_http_request_duration_seconds_sum[5m])) / sum(rate(prometheus_http_request_duration_seconds_count[5m]))
+
+# Последний бакет накопительный и обязателен: le="+Inf".
+sum by (le) (rate(prometheus_http_request_duration_seconds_bucket{le="+Inf"}[5m]))
+
+# ---------------------------------------------------------------------
+# ШАГ 9. ПРЕДСКАЗАНИЕ: PREDICT_LINEAR И «КОГДА ЗАКОНЧИТСЯ ДИСК»
+# ---------------------------------------------------------------------
+
+# Свободное место на корневом разделе в гигабайтах.
+node_filesystem_avail_bytes{mountpoint="/"} / 1073741824
+
+# Скорость убывания свободного места: байты в секунду.
+deriv(node_filesystem_avail_bytes{mountpoint="/"}[1h])
+
+# Сколько байт останется через четыре часа.
+predict_linear(node_filesystem_avail_bytes{mountpoint="/"}[1h], 4 * 3600)
+
+# Сколько часов осталось до заполнения при скорости за час.
+predict_linear(node_filesystem_avail_bytes{mountpoint="/"}[1h], 4 * 3600) / -3600
+
+# Порог «через четыре часа останется меньше гигабайта»:
+# заготовка правила оповещения из практики 8.
+predict_linear(node_filesystem_avail_bytes{mountpoint="/"}[1h], 4 * 3600) < 1073741824
+
+# ---------------------------------------------------------------------
+# ШАГ 10. ПОРОГОВЫЕ ВЫРАЖЕНИЯ: >, AND, OR, UNLESS, BOOL
+# ---------------------------------------------------------------------
+
+# Фильтр по значению: остальные ряды исчезают, а не обнуляются.
+node_load1{env="lab"} > 2
+
+# bool сохраняет ряды и заменяет значение на 1 или 0.
+node_load1{env="lab"} > bool 2
+
+# Пересечение: высокая загрузка И мало свободной памяти.
+node_load1{env="lab"} > 2 and on (instance) (node_memory_MemAvailable_bytes < 1073741824)
+
+# Объединение: высокая загрузка ИЛИ мало свободной памяти.
+node_load1{env="lab"} > 2 or on (instance) (node_memory_MemAvailable_bytes < 1073741824)
+
+# unless: все цели, кроме тех, у кого высокая загрузка.
+up == 1 unless on (instance) node_load1 > 2
+
+# Порог на долю: свободного места меньше десяти процентов.
+node_filesystem_avail_bytes{mountpoint="/"} / node_filesystem_size_bytes{mountpoint="/"} < 0.1
+
+# Цель недоступна: это утверждение о сборе, а не о машине.
+up{env="lab"} == 0
+
+# ---------------------------------------------------------------------
+# ШАГ 11. СОРТИРОВКА, ОГРАНИЧЕНИЕ И ЦЕНА ЗАПРОСА
+# ---------------------------------------------------------------------
+
+# Сортировка по убыванию значения: нужна в таблице, не в графике.
+sort_desc(node_filesystem_avail_bytes{mountpoint="/"})
+
+# Только пять самых загруженных целей.
+topk(5, node_load1{env="lab"})
+
+# Обрезка сверху: один выброс перестаёт растягивать шкалу.
+clamp_max(node_load1{env="lab"}, 8)
+
+# Обрезка снизу: убираем отрицательные значения производной.
+clamp_min(deriv(node_memory_MemAvailable_bytes[1h]), 0)
+
+# Округление до целого в тех же единицах измерения.
+round(node_filesystem_avail_bytes{mountpoint="/"} / 1073741824)
+
+# Сколько рядов вернёт запрос: так измеряют его цену.
+count(node_filesystem_avail_bytes)
+
+# Цена запроса без селектора: все ряды node_* сразу.
+count({__name__=~"node_.+"})

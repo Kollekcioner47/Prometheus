@@ -1,0 +1,16 @@
+# Репозиторий Grafana OSS: зеркало Яндекса.
+#
+# Официальный адрес packages.grafana.com / apt.grafana.com
+# из российских сетей недоступен. Зеркало хранит тот же самый
+# репозиторий Grafana Labs по другому адресу.
+#
+# Файл кладётся в /etc/apt/sources.list.d/grafana.list
+#
+# Вариант без проверки подписи (ТОЛЬКО для учебного стенда):
+#   deb [trusted=yes] https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb stable main
+#
+# Вариант с ключом подписи (для рабочей среды; ключ приносится
+# файлом заранее, см. key_import.txt):
+#   deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb stable main
+
+deb https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb stable main

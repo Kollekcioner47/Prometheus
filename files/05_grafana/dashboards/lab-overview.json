@@ -1,0 +1,89 @@
+{
+  "title": "Состояние парка",
+  "uid": "lab-overview",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "time": { "from": "now-6h", "to": "now" },
+  "templating": {
+    "list": [
+      {
+        "name": "instance",
+        "label": "Экземпляр",
+        "type": "query",
+        "datasource": { "type": "prometheus", "uid": "prometheus" },
+        "query": { "query": "label_values(up, instance)", "refId": "A" },
+        "refresh": 1,
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "title": "Доступность целей",
+      "type": "stat",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "up{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 0 }
+    },
+    {
+      "id": 2,
+      "title": "Загрузка CPU",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "1 - avg by (instance) (rate(node_cpu_seconds_total{mode=\"idle\", instance=~\"$instance\"}[5m]))",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "percentunit", "min": 0, "max": 1 },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 0 }
+    },
+    {
+      "id": 3,
+      "title": "Свободное место",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_filesystem_avail_bytes{instance=~\"$instance\", fstype!~\"tmpfs|squashfs|overlay\"}",
+          "legendFormat": "{{instance}} {{mountpoint}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": { "unit": "bytes", "thresholds": { "mode": "absolute", "steps": [ { "color": "red", "value": null }, { "color": "green", "value": 5368709120 } ] } },
+        "overrides": []
+      },
+      "gridPos": { "h": 8, "w": 12, "x": 0, "y": 8 }
+    },
+    {
+      "id": 4,
+      "title": "Доступная память",
+      "type": "timeseries",
+      "datasource": { "type": "prometheus", "uid": "prometheus" },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "node_memory_MemAvailable_bytes{instance=~\"$instance\"}",
+          "legendFormat": "{{instance}}"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "bytes" }, "overrides": [] },
+      "gridPos": { "h": 8, "w": 12, "x": 12, "y": 8 }
+    }
+  ]
+}

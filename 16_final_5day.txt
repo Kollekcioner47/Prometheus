@@ -1,0 +1,1898 @@
+Практика 16. Итоговая работа: мониторинг как в продакшене.
+
+ЭТО ПОСЛЕДНЯЯ ПРАКТИКА КУРСА. Новых инструментов здесь нет: всё,
+что мы делаем, уже разобрано в практиках 1–15. Задача другая —
+собрать из этих частей один стенд, который отвечает на требования
+«как в продакшене», и доказать это командами, а не общим
+впечатлением «вроде работает». Здесь видно, чего стоит мониторинг,
+собранный на скорую руку: требования проверяются по очереди,
+и каждое либо выполняется, либо нет.
+
+=========================================================================
+ЧТО МЫ СДЕЛАЕМ
+=========================================================================
+
+Соберём итоговую конфигурацию Prometheus: цели приходят из файла
+обнаружения, а не из списка адресов в конфигурации; правила записи
+и оповещения подключены абсолютными путями; блок remote_write
+записан как заглушка.
+
+Напишем правила записи и оповещения и закроем их юнит-тестами
+promtool test rules. Настроим маршрутизацию Alertmanager так, чтобы
+critical уходил немедленно, warning — группой раз в час, info —
+только в дашборд.
+
+Соберём дашборд с переменными и переведём источник данных
+и дашборды Grafana на провижининг из файлов. Вернём в строй свой
+экспортёр из практики 13 и поставим на его метриках правило записи.
+
+Проверим конфигурации «как в конвейере» — теми же командами, что
+в практике 15 выполнял конвейер, но руками. Сделаем резервную копию
+и проверим восстановление в отдельный каталог.
+
+Устроим три учебных отказа: недоступная цель, растущий диск
+и истёкший сертификат. Каждый разберём по схеме «симптом →
+проверка → действие». Пройдём чек-лист приёмки, разберём, что
+осталось ручным шагом, уберём за собой и снимем снимок стенда.
+
+=========================================================================
+ЧТО ПОНАДОБИТСЯ
+=========================================================================
+
+СТЕНД, СОБРАННЫЙ В ПРАКТИКАХ 1–15:
+
+  * mon 10.0.2.5 — Prometheus 3.15.0, Alertmanager 0.34.1,
+    Grafana OSS 12.0.10, node_exporter 1.12.1,
+    blackbox_exporter 0.29.0, Pushgateway 1.11.4;
+  * web1 10.0.2.11 — nginx, nginx-prometheus-exporter, node_exporter,
+    второй blackbox_exporter для внешних проверок;
+  * db1 10.0.2.12 — PostgreSQL, postgres_exporter, node_exporter;
+  * app1 10.0.2.13 — Docker, cAdvisor, node_exporter
+    и свой экспортёр из практики 13 на порту 9200.
+
+Учётная запись engineer, пароль Console47, sudo без пароля.
+Службы на mon работают от пользователя prometheus.
+
+ФАЙЛЫ КУРСА. Из каталога files/16_final_5day/ понадобятся:
+
+  * prometheus.yml — итоговая конфигурация;
+  * targets/node.json — список целей для обнаружения из файла;
+  * rules/recording.rules.yml — правила записи;
+  * rules/alerting.rules.yml — правила оповещения;
+  * rules/tests/rules.test.yml — юнит-тесты правил;
+  * alertmanager.yml — маршрутизация;
+  * provisioning/datasources/prometheus.yml — источник данных;
+  * provisioning/dashboards/lab.yml — провайдер дашбордов;
+  * dashboard.json — дашборд с переменными;
+  * checklist.md — чек-лист приёмки.
+
+ЧТО ДОЛЖНО БЫТЬ СДЕЛАНО РАНЬШЕ:
+
+  * конфигурация лежит в git, и в ней есть .gitignore из практики 15;
+  * правило Watchdog и файл watchdog.rules.yml на месте;
+  * права 600 на /etc/alertmanager/alertmanager.yml;
+  * учебный webhook-приёмник из практики 9 доступен, иначе
+    проверка доставки из шага 10 не пройдёт.
+
+ВРЕМЯ. Два академических часа. Практика плотная: если стенд
+приходится собирать заново, она не укладывается в занятие —
+в этом случае приходят со снимком, снятым после практики 15.
+
+#########################################################################
+ЧАСТЬ 1. ИТОГОВАЯ КОНФИГУРАЦИЯ, ПРАВИЛА И ИХ ТЕСТЫ
+#########################################################################
+
+=========================================================================
+ШАГ 1. ЗАДАНИЕ: ТРЕБОВАНИЯ, КОТОРЫЕ ПРОВЕРЯЮТСЯ КОМАНДОЙ
+=========================================================================
+
+Прежде чем что-то делать, зафиксируем требования. Мониторинг
+«как в продакшене» на учебном стенде — это список проверяемых
+пунктов. Пункт, который нельзя проверить командой, не считается.
+
+  1. Prometheus собирает метрики со всех машин стенда и со всех
+     служб, и ни одна цель не в состоянии DOWN.
+  2. Цели обнаружены из файла, а не перечислены в конфигурации.
+  3. Есть правила записи, и ряды этих правил видны в запросах.
+  4. Есть правила оповещения, и они закрыты тестами.
+  5. Маршрутизация: critical — немедленно, warning — группой
+     раз в час, info — только в дашборд.
+  6. Дашборд собран с переменными, источник данных и дашборд
+     приходят из файлов провижининга.
+  7. Свой экспортёр из практики 13 работает, и на его метриках
+     есть правило записи.
+  8. Конфигурации проходят проверку теми же командами, что
+     в конвейере практики 15.
+  9. Резервная копия сделана, и восстановление проверено
+     в отдельный каталог.
+  10. Три учебных отказа воспроизведены и разобраны, стенд
+      после них возвращён в исходное состояние.
+
+ПОЧЕМУ ИМЕННО ТАК: требование, которое проверяется командой,
+невозможно «выполнить наполовину». Именно поэтому в чек-листе
+приёмки (files/16_final_5day/checklist.md) у каждого пункта стоит
+не описание, а команда и ожидаемый вывод.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: приёмка мониторинга в рабочей среде выглядит
+так же. Разница в том, что пунктов больше и часть из них проверяет
+не человек, а конвейер.
+
+=========================================================================
+ШАГ 2. ОБНАРУЖЕНИЕ ЦЕЛЕЙ ИЗ ФАЙЛА
+=========================================================================
+
+Начнём с пункта 2. Список адресов в static_configs работает, пока
+машин четыре. На сорока он превращается в источник ошибок: адрес
+добавили в одном месте, а метки забыли в другом.
+
+Обнаружение из файла решает это иначе: Prometheus перечитывает файл
+каждые 30 секунд, и добавление машины сводится к правке JSON.
+Службу перезапускать не нужно, конфигурацию Prometheus — тоже.
+
+Создадим каталог и файл обнаружения:
+
+  sudo mkdir -p /etc/prometheus/targets
+  sudo chown prometheus:prometheus /etc/prometheus/targets
+
+Файл files/16_final_5day/targets/node.json:
+
+  [
+    {
+      "targets": [
+        "10.0.2.5:9100"
+      ],
+      "labels": {
+        "env": "lab",
+        "host": "mon",
+        "role": "monitoring"
+      }
+    },
+    {
+      "targets": [
+        "10.0.2.11:9100"
+      ],
+      "labels": {
+        "env": "lab",
+        "host": "web1",
+        "role": "web"
+      }
+    },
+    {
+      "targets": [
+        "10.0.2.12:9100"
+      ],
+      "labels": {
+        "env": "lab",
+        "host": "db1",
+        "role": "database"
+      }
+    },
+    {
+      "targets": [
+        "10.0.2.13:9100"
+      ],
+      "labels": {
+        "env": "lab",
+        "host": "app1",
+        "role": "application"
+      }
+    }
+  ]
+
+ПОЧЕМУ ИМЕННО ТАК: формат file_sd — это список объектов, у каждого
+из которых есть targets и labels. Первая ошибка при переходе
+на обнаружение из файла — попытка положить в файл тот же YAML,
+что был в конфигурации. Prometheus прочитает такой файл, не найдёт
+поля targets и молча оставит обнаружение пустым: цель не появится,
+а ошибки в журнале не будет.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: файл обнаружения часто генерируется другой
+системой — системой управления конфигурацией, скриптом инвентаря,
+внешним API. Prometheus тогда ничего не знает о том, откуда взялись
+адреса, и это правильное разделение: сбор и учёт машин — разные
+задачи.
+
+ПРОВЕРКА: проверим формат файла до подключения.
+
+  python3 -c "import json;print(len(json.load(open('/etc/prometheus/targets/node.json'))))"
+  4
+
+=========================================================================
+ШАГ 3. ИТОГОВАЯ КОНФИГУРАЦИЯ PROMETHEUS
+=========================================================================
+
+Ниже он напечатан целиком — это files/16_final_5day/prometheus.yml.
+
+  # Итоговая конфигурация Prometheus для стенда курса.
+  # Практика 16, трек «5 дней».
+  #
+  # Отличия от учебных конфигураций предыдущих практик:
+  #   * ни одной секции static_configs — цели только из файлов;
+  #   * файлы правил подключены абсолютными путями;
+  #   * маршрутизация оповещений описана получателями, а не одним
+  #     получателем по умолчанию;
+  #   * блок remote_write записан, но закомментирован: отдалённого
+  #     хранилища в стенде нет.
+
+  global:
+    scrape_interval: 15s
+    evaluation_interval: 15s
+    external_labels:
+      env: lab
+      monitor: prometheus-01
+
+  rule_files:
+    - /etc/prometheus/rules/recording.rules.yml
+    - /etc/prometheus/rules/alerting.rules.yml
+
+  storage:
+    tsdb:
+      retention:
+        time: 15d
+
+  alerting:
+    alertmanagers:
+      - static_configs:
+          - targets:
+              - 10.0.2.5:9093
+
+  # Отдалённое хранилище: в стенде курса его нет.
+  # Блок оставлен закомментированным, чтобы было видно место, куда
+  # он встанет при появлении VictoriaMetrics или Thanos. Пока он
+  # закомментирован, данные не покидают машину mon и живут 15 дней.
+  #
+  # remote_write:
+  #   - url: http://<VM_HOST>:8428/api/v1/write
+  #     queue_config:
+  #       max_samples_per_send: 2000
+  #       capacity: 10000
+  #     write_relabel_configs:
+  #       - source_labels: [__name__]
+  #         regex: 'node_cpu_seconds_total|node_memory_.*'
+  #         action: keep
+
+  scrape_configs:
+    # Сам Prometheus: одно задание, одна цель.
+    - job_name: prometheus
+      static_configs:
+        - targets:
+            - localhost:9090
+
+    # Все машины стенда: цели приходят из файла, который читается
+    # заново каждые 30 секунд. Добавление машины — правка JSON,
+    # а не правка этой конфигурации.
+    - job_name: node
+      file_sd_configs:
+        - files:
+            - /etc/prometheus/targets/*.json
+          refresh_interval: 30s
+
+    # Службы: адреса заданы прямо здесь, потому что их ровно три
+    # и они не меняются. Файл нужен там, где список растёт.
+    - job_name: nginx
+      static_configs:
+        - targets:
+            - 10.0.2.11:9113
+          labels:
+            env: lab
+
+    - job_name: postgres
+      static_configs:
+        - targets:
+            - 10.0.2.12:9187
+          labels:
+            env: lab
+
+    - job_name: docker
+      static_configs:
+        - targets:
+            - 10.0.2.13:8080
+          labels:
+            env: lab
+
+    # Свой экспортёр из практики 13: тот же порт 9200,
+    # та же учётная запись lab_exporter.
+    - job_name: lab_exporter
+      static_configs:
+        - targets:
+            - 10.0.2.13:9200
+          labels:
+            env: lab
+
+    # Pushgateway: honor_labels обязателен, иначе метки job и instance
+    # из URL отправки будут перезаписаны метками задания.
+    - job_name: pushgateway
+      honor_labels: true
+      static_configs:
+        - targets:
+            - localhost:9091
+          labels:
+            env: lab
+
+    # Проверки извне: blackbox_exporter стоит на mon, а цели
+    # подставляются через __param_target, поэтому задание одно,
+    # а проверок сколько угодно.
+    - job_name: blackbox_http
+      metrics_path: /probe
+      params:
+        module:
+          - http_2xx
+      static_configs:
+        - targets:
+            - https://prometheus.io
+            - http://10.0.2.11
+          labels:
+            env: lab
+      relabel_configs:
+        - source_labels: [__address__]
+          target_label: __param_target
+        - source_labels: [__param_target]
+          target_label: instance
+        - target_label: __address__
+          replacement: 10.0.2.5:9115
+
+    # Проверка TLS-порта: цель недоступна — сертификат не отдаётся.
+    # На этом строится третий учебный отказ в практике 16.
+    - job_name: blackbox_tls
+      metrics_path: /probe
+      params:
+        module:
+          - tcp_connect
+      static_configs:
+        - targets:
+            - 10.0.2.11:443
+          labels:
+            env: lab
+      relabel_configs:
+        - source_labels: [__address__]
+          target_label: __param_target
+        - source_labels: [__param_target]
+          target_label: instance
+        - target_label: __address__
+          replacement: 10.0.2.5:9115
+
+ВАЖНО: старые файлы правил из практик 8 и 15 остаются на диске,
+но в rule_files их нет. Это не беспорядок, а осознанное решение:
+правила должны быть подключены ровно один раз, и итоговая работа
+подключает свои два файла. Файлы предыдущих практик сохраняются
+как образец, но не влияют на вычисления. Если у вас в rule_files
+и остались старые пути, оповещения будут приходить дважды с разными
+именами правил.
+
+ПРОВЕРКА: до подключения — проверка синтаксиса и перезагрузка.
+
+  sudo cp /home/engineer/files/16_final_5day/prometheus.yml /etc/prometheus/prometheus.yml
+  sudo chown prometheus:prometheus /etc/prometheus/prometheus.yml
+  sudo -u prometheus promtool check config /etc/prometheus/prometheus.yml
+  SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file
+  sudo systemctl reload prometheus
+
+Страница http://10.0.2.5:9090/targets должна показать все цели
+в состоянии UP. У задания node в колонке Labels появились метки
+host и role из файла обнаружения.
+
+=========================================================================
+ШАГ 4. ПРАВИЛА ЗАПИСИ
+=========================================================================
+
+Правила записи нужны не «для красоты». Четыре ряда, вычисленных
+один раз, обслуживают и дашборд, и правила оповещения, и запрос
+дежурного. Если каждый из них считает загрузку процессора своим
+выражением, рано или поздно они разойдутся, и спор «у меня на
+графике 40 процентов» станет неразрешимым.
+
+Файл files/16_final_5day/rules/recording.rules.yml напечатан целиком.
+
+  # Правила записи итоговой работы. Практика 16.
+  #
+  # Правило записи вычисляется по тому же расписанию, что и правила
+  # оповещения: evaluation_interval равен 15s. Имя правила собрано
+  # из трёх частей через двоеточия: level:metric:operations.
+  #
+  # Каждое правило здесь нужно не «для красоты»: дашборд итоговой
+  # работы строится именно на этих четырёх рядах, а не на сырых
+  # метриках. Разница видна по времени ответа панели.
+
+  groups:
+    - name: lab.recording
+      interval: 15s
+      rules:
+        # Загрузка процессора: доля занятого времени по каждой машине.
+        # Считается по пятиминутному окну, поэтому скачок на одну
+        # выборку не превращается в скачок на графике.
+        - record: instance:node_cpu_utilization:ratio
+          expr: |
+            1 - avg by (instance) (
+              rate(node_cpu_seconds_total{mode="idle"}[5m])
+            )
+
+        # Доля доступной памяти. Именно доля, а не байты: порог
+        # «меньше 10 процентов» одинаков для машин с 2 и с 4 ГБ.
+        - record: instance:node_memory_available:ratio
+          expr: |
+            node_memory_MemAvailable_bytes
+            /
+            node_memory_MemTotal_bytes
+
+        # Доля занятого места на разделе. Отбираются только
+        # настоящие файловые системы: tmpfs, overlay и squashfs
+        # к дискам машины отношения не имеют.
+        - record: instance:node_filesystem_used:ratio
+          expr: |
+            1 - (
+              node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+              /
+              node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            )
+
+        # Загрузка своего экспортёра из практики 13: сколько заданий
+        # в очереди в среднем за пять минут. Правило записи на своих
+        # метриках нужен, чтобы дашборд не зависел от того, жив ли
+        # экспортёр прямо сейчас.
+        - record: job:lab_queue_depth:avg5m
+          expr: |
+            avg_over_time(lab_queue_depth{job="lab_exporter"}[5m])
+
+ПОЧЕМУ ИМЕННО ТАК: имена правил записи собраны по схеме
+level:metric:operations — с двоеточиями. Двоеточие в имени не
+декорация: по нему сразу видно, что перед вами вычисленный ряд,
+а не метрика экспортёра. Метрика экспортёра двоеточий не содержит
+никогда, и это закреплено в соглашениях о формате exposition.
+
+ЧЕГО НЕ ДЕЛАТЬ: не давайте правилу записи имя, совпадающее
+с именем метрики. Ряд с тем же именем, но другим набором меток
+создаст путаницу в запросах: выражение станет возвращать
+и сырые, и вычисленные ряды одновременно, а различить их будет
+нечем.
+
+ПРОВЕРКА:
+
+  promtool check rules /etc/prometheus/rules/recording.rules.yml
+  SUCCESS: 4 rules found
+
+После перезагрузки конфигурации проверьте ряд в веб-интерфейсе:
+
+  instance:node_cpu_utilization:ratio
+
+Значение от 0 до 1, по одному ряду на машину.
+
+=========================================================================
+ШАГ 5. ПРАВИЛА ОПОВЕЩЕНИЯ
+=========================================================================
+
+Файл files/16_final_5day/rules/alerting.rules.yml напечатан целиком.
+Комментарии в нём — часть объяснения, а не украшение: в рабочей среде
+именно они отвечают на вопрос «почему здесь такой порог».
+
+  # Правила оповещения итоговой работы. Практика 16.
+  #
+  # У каждого правила три части, без которых оно не работает:
+  #   expr   — условие; должно быть ложным, когда всё в порядке;
+  #   for    — сколько условие должно держаться, прежде чем звонить;
+  #   labels — по ним Alertmanager решает, кому и когда сообщить.
+  #
+  # Значение severity из labels — единственное, на что опирается
+  # маршрутизация в alertmanager.yml: critical, warning, info.
+  # Ничего другого в дереве маршрутов нет, и это сделано намеренно:
+  # маршрут по свободному тексту рано или поздно перестаёт совпадать.
+
+  groups:
+    - name: lab.alerting
+      interval: 15s
+      rules:
+        # Машина недоступна. up равно 0 означает «собрать метрики
+        # не удалось», а не «машина выключена»: причин может быть
+        # три, и они разбираются в практике 2.
+        - alert: InstanceDown
+          expr: up{env="lab"} == 0
+          for: 2m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Цель {{ $labels.instance }} недоступна"
+            description: >-
+              Задание {{ $labels.job }} не отвечает больше двух минут.
+              Проверьте доступность цели и службу экспортёра.
+
+        # Мало свободной памяти. Порог в долях, а не в байтах.
+        - alert: HostOutOfMemory
+          expr: instance:node_memory_available:ratio < 0.10
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Мало памяти на {{ $labels.instance }}"
+            description: >-
+              Свободно {{ $value | humanizePercentage }} памяти
+              от общей. Разбираться нужно до того, как придёт OOM.
+
+        # Диск закончится в ближайшие четыре часа. Линейное
+        # предсказание по последнему часу: на ровном графике
+        # predict_linear может дать отрицательное значение, и это
+        # нормально — условия всё равно ложное.
+        - alert: DiskWillFillIn4Hours
+          expr: |
+            predict_linear(
+              node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[1h],
+              4 * 3600
+            ) < 0
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Диск {{ $labels.device }} на {{ $labels.instance }} кончается"
+            description: >-
+              По скорости за последний час места хватит меньше чем
+              на четыре часа.
+
+        # Диск уже заполнен. Это critical: писать в него больше
+        # нельзя, и часть служб уже не работает.
+        - alert: HostOutOfDiskSpace
+          expr: instance:node_filesystem_used:ratio > 0.90
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Диск {{ $labels.device }} на {{ $labels.instance }} заполнен"
+            description: >-
+              Занято {{ $value | humanizePercentage }} раздела.
+
+        # Сертификат истекает. Сравнение с time() вместо predict_linear:
+        # дата истечения — это факт, а не тренд.
+        - alert: SSLCertificateExpiringSoon
+          expr: |
+            (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
+          for: 1h
+          labels:
+            severity: warning
+          annotations:
+            summary: "Сертификат {{ $labels.instance }} истекает"
+            description: >-
+              Осталось {{ $value | humanize }} дней.
+
+        # Проверка извне не проходит. Отдельное правило, потому что
+        # это утверждение о доступности сервиса, а не о машине.
+        - alert: BlackboxProbeFailed
+          expr: probe_success == 0
+          for: 3m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Проверка {{ $labels.instance }} не проходит"
+            description: >-
+              Модуль {{ $labels.module }} вернул отказ.
+
+        # Сторожевой пёс: горит постоянно. Молчание этого оповещения —
+        # сигнал, что сломана цепочка «Prometheus — Alertmanager —
+        # получатель». severity: info, потому что в дашборд он попадает,
+        # а дежурного будить не должен.
+        #
+        # Поля for у этого правила нет намеренно: сторожить нужно
+        # с первой секунды, а задержка здесь означала бы, что минуту
+        # после отказа канала оповещений тишина считается нормой.
+        - alert: LabWatchdog
+          expr: vector(1)
+          labels:
+            severity: info
+          annotations:
+            summary: "Цепочка оповещений жива"
+            description: >-
+              Это оповещение горит всегда. Если оно пропало,
+              сломан канал доставки.
+
+        # Свой экспортёр не отдаёт метрики. Здесь видно, зачем нужен
+        # свой экспортёр в строю: правило на его метриках ловит отказ
+        # раньше, чем о нём сообщит владелец очереди.
+        - alert: LabExporterQueueStuck
+          expr: |
+            job:lab_queue_depth:avg5m > 100
+            and
+            rate(lab_batch_jobs_total[10m]) == 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Очередь своего экспортёра не разбирается"
+            description: >-
+              Глубина очереди {{ $value }}, при этом заданий
+              не выполняется.
+
+    # Правило записи, которое нужно только для одного оповещения
+    # выше: скорость выполнения заданий. Живёт в отдельной группе,
+    # потому что вычисляется по другой метрике.
+    - name: lab.recording.jobs
+      interval: 15s
+      rules:
+        - record: job:lab_batch_jobs:rate5m
+          expr: sum by (job) (rate(lab_batch_jobs_total[5m]))
+выглядит понятнее человеку и хуже работает: маршрут по регулярному
+выражению рано или поздно перестаёт совпадать, и оповещение молча
+уходит получателю по умолчанию.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: правило оповещения — это не «сообщить о факте»,
+а «сообщить о факте тому, кто может на него повлиять, и не раньше,
+чем факт подтвердится». Отсюда for у каждого правила и отсюда
+деление по severity.
+
+ПРОВЕРКА:
+
+  promtool check rules /etc/prometheus/rules/alerting.rules.yml
+  SUCCESS: 9 rules found
+
+Девять, а не восемь: вторая группа lab.recording.jobs содержит
+правило записи, и оно тоже считается.
+
+=========================================================================
+ШАГ 6. ТЕСТЫ ПРАВИЛ
+=========================================================================
+
+Проверка синтаксиса ловит опечатку. Она не ловит правило, которое
+истинно всегда: такое правило синтаксически безупречно и при этом
+бесполезно. Тест подаёт выдуманные ряды и требует конкретного
+результата — какого оповещения и с какими метками.
+
+Файл files/16_final_5day/rules/tests/rules.test.yml напечатан
+целиком. В нём девять тестов: по одному на каждое оповещение
+и отдельные проверки правил записи. Для части оповещений
+в файле есть второй тест — на противоположный случай, когда
+условия нет и оповещения быть не должно.
+
+  # Юнит-тесты правил. Практика 16, шаг 5.
+  #
+  # Тест — это выдуманные ряды и утверждение о том, какие оповещения
+  # обязаны появиться. Проверка синтаксиса ловит опечатку, но не
+  # ловит правило, которое сформулировано неверно: правило, которое
+  # истинно всегда, синтаксически безупречно.
+  #
+  # Запуск:
+  #   cd /etc/prometheus
+  #   promtool test rules rules/tests/rules.test.yml
+  #
+  # Часть «alert_rule_test» проверяет оповещения, часть
+  # «promql_expr_test» — правила записи и обычные выражения.
+  #
+  # В файле девять тестов: по одному на каждое оповещение из
+  # alerting.rules.yml и проверки правил записи. У каждого оповещения
+  # есть тест ещё и на противоположный случай — когда условия нет
+  # и оповещения быть не должно.
+
+  rule_files:
+    - ../recording.rules.yml
+    - ../alerting.rules.yml
+
+  evaluation_interval: 1m
+
+  tests:
+    # 1. Машина недоступна. Достаточно одного ряда up == 0:
+    # именно так выглядит цель, до которой Prometheus не дошёл.
+    - interval: 1m
+      input_series:
+        - series: 'up{job="node", instance="10.0.2.11:9100", env="lab"}'
+          values: '0x10'
+      alert_rule_test:
+        - eval_time: 3m
+          alertname: InstanceDown
+          exp_alerts:
+            - exp_labels:
+                severity: critical
+                instance: "10.0.2.11:9100"
+                job: node
+                env: lab
+              exp_annotations:
+                summary: "Цель 10.0.2.11:9100 недоступна"
+                description: >-
+                  Задание node не отвечает больше двух минут.
+                  Проверьте доступность цели и службу экспортёра.
+
+    # 2. Цель ожила: на третьей минуте оповещения быть не должно.
+    # Это вторая половина проверки — правило обязано и зажигаться,
+    # и гаснуть.
+    - interval: 1m
+      input_series:
+        - series: 'up{job="node", instance="10.0.2.11:9100", env="lab"}'
+          values: '0x3 1x7'
+      alert_rule_test:
+        - eval_time: 7m
+          alertname: InstanceDown
+          exp_alerts: []
+
+    # 3. Мало памяти: проверяется правило записи и правило
+    # оповещения вместе.
+    - interval: 1m
+      input_series:
+        - series: 'node_memory_MemTotal_bytes{instance="10.0.2.12:9100", job="node"}'
+          values: '4000000000x20'
+        - series: 'node_memory_MemAvailable_bytes{instance="10.0.2.12:9100", job="node"}'
+          values: '300000000x20'
+      promql_expr_test:
+        - expr: instance:node_memory_available:ratio
+          eval_time: 5m
+          exp_samples:
+            - labels: 'instance:node_memory_available:ratio{instance="10.0.2.12:9100", job="node"}'
+              value: 0.075
+      alert_rule_test:
+        - eval_time: 7m
+          alertname: HostOutOfMemory
+          exp_alerts:
+            - exp_labels:
+                severity: warning
+                instance: "10.0.2.12:9100"
+                job: node
+              exp_annotations:
+                summary: "Мало памяти на 10.0.2.12:9100"
+                description: >-
+                  Свободно 7.5% памяти от общей. Разбираться нужно
+                  до того, как придёт OOM.
+
+    # 4. Диск заполнен. Два раздела на одной машине: правило обязано
+    # сработать только на том, который перешёл порог.
+    - interval: 1m
+      input_series:
+        - series: 'node_filesystem_avail_bytes{instance="10.0.2.13:9100", job="node", device="/dev/sda1", fstype="ext4", mountpoint="/"}'
+          values: '500000000x20'
+        - series: 'node_filesystem_size_bytes{instance="10.0.2.13:9100", job="node", device="/dev/sda1", fstype="ext4", mountpoint="/"}'
+          values: '20000000000x20'
+      alert_rule_test:
+        - eval_time: 8m
+          alertname: HostOutOfDiskSpace
+          exp_alerts:
+            - exp_labels:
+                severity: critical
+                instance: "10.0.2.13:9100"
+                job: node
+                device: "/dev/sda1"
+                fstype: ext4
+                mountpoint: "/"
+              exp_annotations:
+                summary: "Диск /dev/sda1 на 10.0.2.13:9100 заполнен"
+                description: "Занято 97.5% раздела."
+
+    # 5. Внешняя проверка не проходит. Здесь видно, что blackbox
+    # и цель живут в разных заданиях, и метка instance у них разная.
+    - interval: 1m
+      input_series:
+        - series: 'probe_success{instance="http://10.0.2.11", job="blackbox_http", module="http_2xx"}'
+          values: '0x10'
+      alert_rule_test:
+        - eval_time: 5m
+          alertname: BlackboxProbeFailed
+          exp_alerts:
+            - exp_labels:
+                severity: critical
+                instance: "http://10.0.2.11"
+                job: blackbox_http
+                module: http_2xx
+              exp_annotations:
+                summary: "Проверка http://10.0.2.11 не проходит"
+                description: "Модуль http_2xx вернул отказ."
+
+    # 6. Сторожевой пёс горит всегда. Если этот тест проходит,
+    # правило на месте; если оповещения нет в Alertmanager —
+    # дело не в правиле.
+    - interval: 1m
+      input_series:
+        - series: 'up{job="prometheus", instance="localhost:9090"}'
+          values: '1x10'
+      alert_rule_test:
+        - eval_time: 5m
+          alertname: LabWatchdog
+          exp_alerts:
+            - exp_labels:
+                severity: info
+              exp_annotations:
+                summary: "Цепочка оповещений жива"
+                description: >-
+                  Это оповещение горит всегда. Если оно пропало,
+                  сломан канал доставки.
+
+    # 7. Свой экспортёр из практики 13: очередь растёт, заданий
+    # не выполняется. Проверяется правило на своих метриках.
+    - interval: 1m
+      input_series:
+        - series: 'lab_queue_depth{job="lab_exporter", instance="10.0.2.13:9200"}'
+          values: '150x25'
+        - series: 'lab_batch_jobs_total{job="lab_exporter", instance="10.0.2.13:9200"}'
+          values: '0x25'
+      promql_expr_test:
+        - expr: job:lab_queue_depth:avg5m
+          eval_time: 10m
+          exp_samples:
+            - labels: 'job:lab_queue_depth:avg5m{job="lab_exporter", instance="10.0.2.13:9200"}'
+              value: 150
+      alert_rule_test:
+        - eval_time: 20m
+          alertname: LabExporterQueueStuck
+          exp_alerts:
+            - exp_labels:
+                severity: warning
+                job: lab_exporter
+                instance: "10.0.2.13:9200"
+              exp_annotations:
+                summary: "Очередь своего экспортёра не разбирается"
+                description: >-
+                  Глубина очереди 150, при этом заданий
+                  не выполняется.
+
+    # 8. Сертификат истекает: до даты осталось меньше 14 дней.
+    # Ряд задан константой 1, а time() растёт вместе с eval_time,
+    # поэтому к десятой минуте разность становится отрицательной.
+    # Так проверяется само условие, а не конкретная дата.
+    - interval: 1m
+      input_series:
+        - series: 'probe_ssl_earliest_cert_expiry{instance="https://prometheus.io", job="blackbox_http", module="http_2xx"}'
+          values: '1x30'
+      alert_rule_test:
+        - eval_time: 5m
+          alertname: SSLCertificateExpiringSoon
+          exp_alerts:
+            - exp_labels:
+                severity: warning
+                instance: "https://prometheus.io"
+                job: blackbox_http
+                module: http_2xx
+              exp_annotations:
+                summary: "Сертификат https://prometheus.io истекает"
+    # 9. Диск заполнится в ближайшие часы. Ряд убывает линейно,
+    # поэтому predict_linear даёт отрицательное значение. Величины
+    # взяты круглыми: 2e9 байт минус 1e7 байт за минуту. Точное
+    # значение предсказания здесь не проверяется — проверяется,
+    # что правило сработало.
+    - interval: 1m
+      input_series:
+        - series: 'node_filesystem_avail_bytes{instance="10.0.2.13:9100", job="node", device="/dev/sda1", fstype="ext4", mountpoint="/"}'
+          values: '2000000000-10000000x100'
+      alert_rule_test:
+        - eval_time: 75m
+          alertname: DiskWillFillIn4Hours
+          exp_alerts:
+            - exp_labels:
+                severity: warning
+                instance: "10.0.2.13:9100"
+                job: node
+                device: "/dev/sda1"
+                fstype: ext4
+                mountpoint: "/"
+              exp_annotations:
+                summary: "Диск /dev/sda1 на 10.0.2.13:9100 кончается"
+ПОЧЕМУ ИМЕННО ТАК: у каждого теста два обязательных случая —
+«оповещение обязано появиться» и «оповещение обязано отсутствовать».
+Тест только на появление проходит и у правила, которое горит
+постоянно. Второй тест в файле выше проверяет именно это: цель
+ожила на третьей минуте, и оповещения быть не должно.
+
+ЧЕГО НЕ ДЕЛАТЬ: не подгоняйте тест под фактический результат.
+Соблазн велик: promtool test rules печатает ожидаемые метки,
+и их можно скопировать в файл, не задумываясь. Так тест перестаёт
+что-либо проверять: он фиксирует текущее поведение, включая
+ошибочное.
+
+ПРОВЕРКА:
+
+  cd /etc/prometheus
+  promtool test rules rules/tests/rules.test.yml
+  SUCCESS
+
+=========================================================================
+#########################################################################
+ЧАСТЬ 2. МАРШРУТИЗАЦИЯ, GRAFANA, ОТКАЗЫ И ПРИЁМКА
+#########################################################################
+
+=========================================================================
+ШАГ 7. МАРШРУТИЗАЦИЯ: CRITICAL, WARNING, INFO
+=========================================================================
+
+Требование задания звучит так: critical — немедленно, warning —
+группой раз в час, info — только в дашборд. Три слова «немедленно»,
+«раз в час» и «только в дашборд» переводятся в параметры маршрута.
+
+Файл files/16_final_5day/alertmanager.yml напечатан целиком. Токен
+бота и пароль SMTP в нём заменены учебными заглушками: в рабочей
+среде эти значения подставляет система управления конфигурацией,
+а сам файл лежит с правами 600 и владельцем prometheus.
+
+  # Маршрутизация оповещений итоговой работы. Практика 16, шаг 6.
+  #
+  # Требование задания: critical — немедленно, warning — группой
+  # раз в час, info — только в дашборд.
+  #
+  # «Только в дашборд» означает, что у маршрута info нет получателя,
+  # кроме пустого. Alertmanager не умеет «не отправлять»: у каждого
+  # маршрута есть receiver, и если сообщение не должно уходить людям,
+  # получателем становится тот, который ничего не делает с текстом.
+  # Такой получатель записан первым, и это осознанное решение:
+  # иначе молчаливый маршрут выглядит как забытый.
+  #
+  # Токены и пароли здесь — заглушки. В рабочей среде их подставляет
+  # система управления конфигурацией или файл секретов, а сам
+  # alertmanager.yml лежит с правами 600 и владельцем prometheus.
+
+  global:
+    resolve_timeout: 5m
+    smtp_smarthost: "smtp.lab.local:587"
+    smtp_from: "alertmanager@lab.local"
+    smtp_auth_username: "alertmanager@lab.local"
+    smtp_auth_password: "REPLACE_WITH_SMTP_PASSWORD"
+    smtp_require_tls: true
+
+  templates:
+    - /etc/alertmanager/templates/lab.tmpl
+
+  route:
+    receiver: info-only
+    group_by: ["alertname", "instance"]
+    group_wait: 30s
+    group_interval: 5m
+    repeat_interval: 4h
+
+    routes:
+      # critical: без ожидания группы, повтор каждые 30 минут.
+      # group_wait: 0s здесь уместен, потому что цена задержки
+      # выше цены одного лишнего письма.
+      - matchers:
+          - severity="critical"
+        receiver: oncall-email
+        group_wait: 0s
+        group_interval: 5m
+        repeat_interval: 30m
+        continue: false
+
+      # warning: группируем и отправляем раз в час. За час группа
+      # наберёт связанные оповещения одной машины в одно письмо.
+      - matchers:
+          - severity="warning"
+        receiver: duty-email
+        group_by: ["alertname", "instance", "device"]
+        group_wait: 5m
+        group_interval: 1h
+        repeat_interval: 12h
+        continue: false
+
+      # info: в дашборд. Получатель ничего не отправляет, но история
+      # оповещений остаётся в Alertmanager и видна в Grafana.
+      - matchers:
+          - severity="info"
+        receiver: info-only
+        group_wait: 5m
+        group_interval: 1h
+        repeat_interval: 24h
+        continue: false
+
+  receivers:
+    # Пустой получатель: ни почты, ни вебхука. Нужен как явная
+    # точка «сюда сообщения не идут».
+    #
+    # Отсутствие каналов доставки здесь — решение, а не недоделка:
+    # маршрут info обязан куда-то вести, и он ведёт в получатель,
+    # который ничего не отправляет. Оповещения при этом остаются
+    # в Alertmanager и видны в дашборде.
+    - name: info-only
+
+    - name: oncall-email
+      email_configs:
+        - to: "oncall@lab.local"
+          send_resolved: true
+          headers:
+            subject: "[CRITICAL] {{ .CommonLabels.alertname }}"
+
+    - name: duty-email
+      email_configs:
+        - to: "duty@lab.local"
+          send_resolved: false
+      webhook_configs:
+        - url: "http://10.0.2.5:9095/alerts"
+          send_resolved: false
+
+  inhibit_rules:
+    # Если машина недоступна, про её диск и память молчим: причины
+    # не будет видно всё равно, а сообщений станет втрое больше.
+    - source_matchers:
+        - alertname="InstanceDown"
+      target_matchers:
+        - severity=~"warning|critical"
+      equal: ["instance"]
+
+    # Заполненный диск подавляет предсказание «диск кончится»:
+    # одно и то же событие на разных стадиях.
+    - source_matchers:
+        - alertname="HostOutOfDiskSpace"
+      target_matchers:
+        - alertname="DiskWillFillIn4Hours"
+      equal: ["instance", "device"]
+
+    # Внешняя проверка не проходит — про сам сервис внутри
+    # ничего не сообщаем, пока не выяснится причина.
+    - source_matchers:
+        - alertname="BlackboxProbeFailed"
+      target_matchers:
+        - severity="warning"
+      equal: ["instance"]
+и в amtool config routes show.
+
+ВАЖНО: group_interval у warning равен 1h, и это не то же самое,
+что «сообщение придёт через час». group_interval — время между
+отправками одной и той же группы после первой отправки. Первая
+отправка происходит через group_wait после появления оповещения,
+то есть через пять минут. Разница между этими двумя параметрами —
+источник половины неверных ожиданий от Alertmanager.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: маршрутизация — это способ не разбудить
+дежурного из-за того, что не требует его участия. Оповещение,
+которое приходит всегда, перестают читать.
+
+ПРОВЕРКА: посмотрим дерево маршрутов так, как его видит
+Alertmanager.
+
+  amtool check-config /etc/alertmanager/alertmanager.yml
+  SUCCESS
+  amtool config routes show --config.file=/etc/alertmanager/alertmanager.yml
+
+В выводе должно быть три маршрута с разными получателями.
+ИСПРАВЛЕНО: в прежней версии курса дерева маршрутов не было:
+настройка сводилась к одному route с group_by и одним получателем
+email, без вложенных маршрутов и без continue. Один плоский маршрут
+на все оповещения — это и есть причина, по которой дежурный
+перестаёт читать письма: в одну группу попадает и то, что требует
+его участия, и то, что не требует. Разбор того, как разделить
+оповещения по маршрутам, — в этом шаге.
+
+=========================================================================
+ШАГ 8. GRAFANA: ИСТОЧНИК ДАННЫХ И ДАШБОРД ИЗ ФАЙЛОВ
+=========================================================================
+
+Источник данных и дашборд, добавленные мышью, живут в базе Grafana.
+При переносе на другую машину их нет. Провижининг переносит их
+в файлы, которые лежат в git вместе с остальной конфигурацией.
+
+Файл files/16_final_5day/provisioning/datasources/prometheus.yml:
+
+  # Источник данных Grafana как код. Практика 16, шаг 7.
+  #
+  # Файл кладётся в /etc/grafana/provisioning/datasources/prometheus.yml
+  # и читается при запуске grafana-server. Источник, добавленный
+  # мышью, живёт в базе Grafana и теряется при переносе: здесь он
+  # определён файлом, лежит в git и восстанавливается вместе
+  # с остальной конфигурацией.
+  #
+  # Пароль в basicAuthPassword не задан: у учебного Prometheus учётной
+  # записи нет, наружу он закрыт обратным прокси. В рабочей среде
+  # пароль берётся из переменной окружения и в файле не хранится.
+
+  apiVersion: 1
+
+  deleteDatasources:
+    - name: Prometheus
+      orgId: 1
+
+  datasources:
+    - name: Prometheus
+      type: prometheus
+      access: proxy
+      orgId: 1
+      uid: lab-prometheus
+      url: http://10.0.2.5:9090
+      isDefault: true
+      editable: false
+      jsonData:
+        timeInterval: 15s
+        httpMethod: POST
+        manageAlerts: true
+        prometheusType: Prometheus
+        prometheusVersion: 3.15.0
+        exemplarTraceIdDestinations:
+          - name: trace_id
+            datasourceUid: lab-prometheus
+
+Файл files/16_final_5day/provisioning/dashboards/lab.yml:
+
+  # Провайдер дашбордов Grafana. Практика 16, шаг 7.
+  #
+  # Файл кладётся в /etc/grafana/provisioning/dashboards/lab.yml.
+  # Он говорит Grafana: «читай JSON-файлы из этого каталога и делай
+  # из них дашборды». Каталог /var/lib/grafana/dashboards при этом
+  # монтируется или копируется из репозитория.
+  #
+  # allowUiUpdates: false — важное решение. Дашборд, отредактированный
+  # мышью и сохранённый, живёт до следующего перезапуска Grafana,
+  # а потом возвращается к версии из файла. Это не потеря работы,
+  # а способ не разойтись с git: правки вносятся в JSON и коммитятся.
+
+  apiVersion: 1
+
+  providers:
+    - name: lab
+      orgId: 1
+      folder: Lab
+      folderUid: lab-folder
+      type: file
+      disableDeletion: true
+      allowUiUpdates: false
+      updateIntervalSeconds: 30
+      options:
+        path: /var/lib/grafana/dashboards
+        foldersFromFilesStructure: false
+
+ВАЖНО: имя источника данных повторяет то, что заведено в практике 5, —
+prometheus. Дашборды итоговой работы ссылаются не на имя, а на uid
+lab-prometheus, поэтому переименование источника в Grafana их не ломает.
+Имя и uid в провижининге задаются оба: имя видит человек в интерфейсе,
+uid использует дашборд.
+
+ПОЧЕМУ ИМЕННО ТАК: allowUiUpdates: false означает, что правка
+дашборда мышью не сохранится после следующего перечитывания файлов.
+Это выглядит как неудобство и является решением: дашборд живёт
+в git, изменения проходят через ревью так же, как изменения
+конфигурации Prometheus.
+
+ЧЕГО НЕ ДЕЛАТЬ: не включайте allowUiUpdates: true, чтобы «можно
+было поправить на месте». Правка сохранится в базу Grafana, файл
+останется прежним, и через тридцать секунд обновление из файла
+вернёт старую версию. Хуже того: часть правок окажется в файле,
+часть в базе, и восстановление из копии даст не то, что видно
+на экране.
+
+Дашборд files/16_final_5day/dashboard.json — шесть панелей
+и две переменные:
+
+  * переменная job: label_values(up{env="lab"}, job), multivalue,
+    с вариантом All;
+  * переменная instance: label_values с отбором по выбранному job,
+    то есть переменная зависит от переменной;
+  * панель «Цели в состоянии UP»: sum(up) против count(up);
+  * панель «Загрузка процессора» на правиле записи;
+  * панель «Свободное место на разделах» на правиле записи;
+  * панель «Свободная память» на правиле записи;
+  * таблица с очередью своего экспортёра;
+  * панель состояния внешних проверок на probe_success.
+
+Ниже dashboard.json напечатан сокращённо: полностью приведены
+заголовок, uid, настройки времени и обе переменные, а массив panels
+обозначен многоточием. Панели в этом файле отличаются только
+запросом, типом отображения и порогами, и печатать шесть почти
+одинаковых блоков подряд в практике смысла нет. Полный JSON —
+в files/16_final_5day/dashboard.json; там же видно, что опущено.
+
+  {
+    "title": "Lab: состояние парка",
+    "uid": "lab-fleet-overview",
+    "version": 3,
+    "editable": false,
+    "refresh": "30s",
+    "time": { "from": "now-6h", "to": "now" },
+    "templating": {
+      "list": [
+        {
+          "name": "job",
+          "type": "query",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+          "query": {
+            "query": "label_values(up{env=\"lab\"}, job)",
+            "refId": "lab-job"
+          },
+          "refresh": 1,
+          "includeAll": true,
+          "multi": true
+        },
+        {
+          "name": "instance",
+          "type": "query",
+          "datasource": { "type": "prometheus", "uid": "lab-prometheus" },
+          "query": {
+            "query": "label_values(up{env=\"lab\", job=~\"$job\"}, instance)",
+            "refId": "lab-instance"
+          },
+          "refresh": 2,
+          "includeAll": true,
+          "multi": true
+        }
+      ]
+    },
+    "panels": [ ... ]
+  }
+
+ПРОВЕРКА: скопируем файлы и перезапустим Grafana.
+
+  sudo cp /home/engineer/files/16_final_5day/provisioning/datasources/prometheus.yml \
+    /etc/grafana/provisioning/datasources/prometheus.yml
+  sudo cp /home/engineer/files/16_final_5day/provisioning/dashboards/lab.yml \
+    /etc/grafana/provisioning/dashboards/lab.yml
+  sudo cp /home/engineer/files/16_final_5day/dashboard.json \
+    /var/lib/grafana/dashboards/lab-fleet.json
+  sudo systemctl restart grafana-server
+  sudo journalctl -u grafana-server -n 50 --no-pager | grep -i provision
+  ... msg="finished to provision dashboards" ...
+
+Дашборд открывается по адресу http://10.0.2.5:3000, папка Lab.
+В верхней части страницы — два выпадающих списка: job и instance.
+
+=========================================================================
+ШАГ 9. СВОЙ ЭКСПОРТЁР В СТРОЮ
+=========================================================================
+
+Свой экспортёр из практики 13 занимает последнюю строчку в списке
+требований не случайно. Разница между «я умею писать экспортёры»
+и «мой экспортёр работает в мониторинге» — это правило записи
+и оповещение на его метриках.
+
+Проверим, что экспортёр жив:
+
+  curl -s http://10.0.2.13:9200/metrics | grep -E '^lab_' | head
+  lab_queue_depth 143.0
+  lab_job_duration_seconds_bucket{le="0.1"} 120.0
+  lab_job_duration_seconds_bucket{le="0.5"} 300.0
+  lab_job_duration_seconds_count 340.0
+  lab_job_duration_seconds_sum 42.7
+
+Задание lab_exporter в конфигурации есть, и цель должна быть UP:
+
+  curl -s http://10.0.2.5:9090/api/v1/query?query=up{job="lab_exporter"}
+  "value":[1715000000,"1"]
+
+Правило записи на метриках экспортёра — job:lab_queue_depth:avg5m
+из шага 4 — уже подключено. Оповещение LabExporterQueueStuck
+из шага 5 срабатывает на нём.
+
+ПОЧЕМУ ИМЕННО ТАК: правило записи на своих метриках нужен не
+потому, что так короче запрос в дашборде. Он отвязывает дашборд
+от живости экспортёра: если экспортёр упал, ряд правила ещё
+некоторое время существует, и график показывает последнее
+известное значение, а не пропадает целиком. Пропавший график
+дежурный читает как «нет данных», а не как «экспортёр упал».
+
+ЗАЧЕМ ЭТО В РАБОТЕ: свой экспортёр без правила и без оповещения
+почти бесполезен. Метрики, на которые никто не смотрит и по которым
+ничего не срабатывает, — это работа, потраченная впустую.
+
+ПРОВЕРКА: убедимся, что правило вычисляется.
+
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=job:lab_queue_depth:avg5m'
+  "value":[1715000000,"143"]
+
+=========================================================================
+ШАГ 10. ПРОВЕРКА КОНФИГУРАЦИЙ «КАК В КОНВЕЙЕРЕ»
+=========================================================================
+
+В практике 15 эти команды выполнял конвейер. Здесь мы выполняем
+их руками и по очереди — ровно так, как это делает .gitlab-ci.yml,
+но с выводом перед глазами.
+
+  cd /etc/prometheus
+  sudo -u prometheus promtool check config prometheus.yml
+  SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file
+
+  sudo -u prometheus promtool check rules \
+    rules/recording.rules.yml rules/alerting.rules.yml
+  SUCCESS: 13 rules found
+
+  sudo -u prometheus promtool test rules rules/tests/rules.test.yml
+  SUCCESS
+
+  amtool check-config /etc/alertmanager/alertmanager.yml
+  SUCCESS
+
+  yamllint -c /home/engineer/files/15_operations/ci/.yamllint \
+    /etc/prometheus /etc/alertmanager
+
+ПОЧЕМУ ИМЕННО ТАК: порядок команд повторяет порядок стадий
+конвейера, а не порядок их стоимости. В конвейере дешёвые проверки
+идут первыми, чтобы не тратить время на разбор опечатки. При ручной
+проверке порядок другой: сначала то, что проверяет смысл, потому
+что именно там ошибки дороже.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: расхождение между конвейером и ручной
+проверкой — отдельная проблема. Если конвейер проверяет не то,
+что проверяет человек, изменения проходят с ошибкой. Поэтому
+в практике 15 конвейер собран из тех же команд, что здесь.
+
+ПРОВЕРКА: ни одна из пяти команд не должна завершиться ошибкой.
+Ошибка в yamllint при верном promtool чаще всего означает
+табуляцию в одном из файлов.
+
+=========================================================================
+ШАГ 11. РЕЗЕРВНАЯ КОПИЯ И ПРОВЕРКА ВОССТАНОВЛЕНИЯ
+=========================================================================
+
+Копия делается по правилам практики 15, но с одним отличием:
+в архиве теперь больше файлов — появились файлы обнаружения целей,
+тесты правил и провижининг Grafana.
+
+  cd /
+  sudo tar czf /home/engineer/final-config-$(date +%F).tar.gz \
+    etc/prometheus \
+    etc/alertmanager \
+    etc/grafana/provisioning \
+    etc/blackbox_exporter \
+    var/lib/grafana/dashboards
+
+  sudo chmod 600 /home/engineer/final-config-*.tar.gz
+  scp /home/engineer/final-config-*.tar.gz engineer@10.0.2.11:/home/engineer/
+
+Проверка восстановления — в отдельный каталог, без остановки
+работающего мониторинга:
+
+  mkdir -p /home/engineer/restore-final
+  tar xzf /home/engineer/final-config-2026-05-15.tar.gz \
+    -C /home/engineer/restore-final
+  cd /home/engineer/restore-final/etc/prometheus
+  promtool check config prometheus.yml
+  SUCCESS: .../restore-final/etc/prometheus/prometheus.yml is valid prometheus config file
+
+  promtool test rules rules/tests/rules.test.yml
+  SUCCESS
+
+ВАЖНО: вторая команда важнее первой. Она доказывает, что в копию
+попали не только правила, но и файлы тестов, и что относительные
+пути внутри тестового файла (../recording.rules.yml) работают
+в распакованном каталоге так же, как в рабочем. Копия без тестов
+восстанавливает мониторинг, который нельзя проверить.
+
+  ls -l /home/engineer/restore-final/etc/prometheus/targets/node.json
+  ls -l /home/engineer/restore-final/var/lib/grafana/dashboards/
+
+Проверим, что дашборд в копии — тот самый, с переменными:
+
+  python3 -c "import json;d=json.load(open('/home/engineer/restore-final/var/lib/grafana/dashboards/lab-fleet.json'));print([v['name'] for v in d['templating']['list']])"
+  ['job', 'instance']
+
+ПРОВЕРКА РЕЗУЛЬТАТА этого шага: восстановление проверено, если
+из распакованного каталога проходят и promtool check config,
+и promtool test rules, и найден файл обнаружения целей.
+
+=========================================================================
+ШАГ 12. УЧЕБНЫЙ ОТКАЗ ПЕРВЫЙ: НЕДОСТУПНАЯ ЦЕЛЬ
+=========================================================================
+
+Первый отказ — самый простой и самый частый. Остановим node_exporter
+на db1.
+
+  ssh engineer@10.0.2.12 "sudo systemctl stop node_exporter"
+
+СИМПТОМ. Через две минуты (for: 2m у правила InstanceDown)
+в веб-интерфейсе Prometheus на странице Alerts появляется
+InstanceDown с метками instance="10.0.2.12:9100" и severity
+critical. Через несколько секунд группа появляется в Alertmanager,
+и получатель oncall-email получает письмо — напоминаем: у маршрута
+critical group_wait: 0s, поэтому задержки на группировку нет.
+
+ПРОВЕРКА. Смотрим по цепочке, начиная от Prometheus:
+
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=up{instance="10.0.2.12:9100"}'
+  "value":[1715000000,"0"]
+  curl -s 'http://10.0.2.5:9090/api/v1/alerts' | grep -c InstanceDown
+  amtool alert query --alertmanager.url=http://localhost:9093
+  ssh engineer@10.0.2.12 "systemctl is-active node_exporter"
+  inactive
+
+ДЕЙСТВИЕ. Запускаем службу обратно и наблюдаем Resolved.
+
+  ssh engineer@10.0.2.12 "sudo systemctl start node_exporter"
+
+Разбор: что изменилось и когда.
+
+  * метрика up перешла в 0 сразу после остановки службы;
+  * правило перешло в Pending и оставалось там две минуты;
+  * через for: 2m правило перешло в Firing — только тогда
+    Alertmanager о нём узнал;
+  * при возврате службы Prometheus отправил Resolved, и поскольку
+    у получателя oncall-email стоит send_resolved: true, пришло
+    второе письмо.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: это единственный отказ, в котором видна вся
+цепочка целиком, от метрики до письма. Все остальные отказы
+отличаются только тем, какую метрику они меняют.
+
+ЧЕГО НЕ ДЕЛАТЬ: не оставляйте службу остановленной «чтобы
+посмотреть, как выглядит график». Пока цель недоступна, правило
+подавляет оповещения об этой машине (inhibit_rules из практики 9),
+и следующий отказ на ней вы не увидите.
+
+=========================================================================
+ШАГ 13. УЧЕБНЫЙ ОТКАЗ ВТОРОЙ: РАСТУЩИЙ ДИСК
+=========================================================================
+
+Второй отказ проверяет не факт заполнения, а предсказание.
+Заполним диск на app1 постепенно — так, чтобы сработало правило
+DiskWillFillIn4Hours, а не HostOutOfDiskSpace.
+
+  ssh engineer@10.0.2.13
+
+  for i in $(seq 1 10); do
+    sudo fallocate -l 300M /tmp/fill-disk.img 2>/dev/null || \
+      sudo dd if=/dev/zero of=/tmp/fill-disk.img bs=1M count=300 conv=notrunc oflag=append
+    sleep 60
+  done
+
+Файл растёт на 300 МБ в минуту. При разделе 20 ГБ и текущей
+занятости около 40 процентов правило predict_linear увидит
+устойчивый линейный рост и предскажет заполнение раньше чем через
+четыре часа.
+
+СИМПТОМ. Через десять минут (for: 10m) приходит DiskWillFillIn4Hours
+с severity warning. Напоминаем: маршрут warning имеет group_wait 5m
+и group_interval 1h — первое письмо придёт через пять минут после
+срабатывания, следующее не раньше чем через час.
+
+ПРОВЕРКА. Смотрим фактическую занятость и предсказание:
+
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=instance:node_filesystem_used:ratio{instance="10.0.2.13:9100"}'
+  "value":[1715000000,"0.463"]
+  curl -s --data-urlencode 'query=predict_linear(node_filesystem_avail_bytes{instance="10.0.2.13:9100", mountpoint="/"}[1h], 4 * 3600)' \
+    'http://10.0.2.5:9090/api/v1/query'
+  "value":[1715000000,"-1200345600"]
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=ALERTS{alertname="DiskWillFillIn4Hours"}'
+
+Отрицательное значение во втором запросе означает, что через
+четыре часа свободного места не останется. Если значение
+положительное, а оповещения нет — оцените, хватает ли места
+файлу для роста: при свободных 300 МБ файл заполнит раздел
+за минуту, и правило не успеет заметить тренд.
+
+ДЕЙСТВИЕ. Убираем файл и убеждаемся, что оповещение ушло.
+
+  sudo rm -f /tmp/fill-disk.img
+  df -h /
+
+Разбор: этот отказ отличается от первого тем, что метрика up всё
+время равна 1. Машина доступна, экспортёр отвечает, метрики идут.
+Изменилось только значение одной gauge-метрики, и на нём построено
+правило. Это ответ на вопрос «зачем нужны правила, если видно
+график»: график никто не смотрит круглосуточно.
+
+ПОЧЕМУ ИМЕННО ТАК: правило предсказания срабатывает раньше, чем
+правило заполнения (0.90), и это сделано намеренно. Заполнение
+на 90 процентов — уже авария: часть служб к этому моменту
+перестала писать. Предсказание даёт время.
+
+ЧЕГО НЕ ДЕЛАТЬ: не используйте fallocate с большим размером
+на разделах, где уже мало места. Заполненный под ноль корневой
+раздел на учебной машине лечится загрузкой с другого носителя.
+
+=========================================================================
+ШАГ 14. УЧЕБНЫЙ ОТКАЗ ТРЕТИЙ: ИСТЁКШИЙ СЕРТИФИКАТ
+=========================================================================
+
+Настоящий истёкший сертификат ждать год. Поэтому отказ
+эмулируется: проверка недоступного TLS-порта даёт те же метрики,
+что и проверка сертификата на живом сервисе, — probe_success равен
+нулю, а probe_ssl_earliest_cert_expiry отсутствует.
+
+Задание blackbox_tls из шага 3 проверяет порт 443 на web1
+модулем tcp_connect. На web1 TLS на 443 не настроен: nginx
+отдаёт обычный HTTP на 80. То есть отказ уже воспроизведён
+и ждёт, пока мы его заметим.
+
+СИМПТОМ. Через три минуты (for: 3m) приходит BlackboxProbeFailed
+с severity critical. Через час — SSLCertificateExpiringSoon
+с severity warning: условие (probe_ssl_earliest_cert_expiry -
+time()) / 86400 < 14 при отсутствующей метрике не выполняется,
+и это правило молчит. Так и должно быть: если сертификата нет
+вообще, вопрос «сколько ему осталось» бессмысленен.
+
+ПРОВЕРКА. Смотрим, что именно проверял blackbox:
+
+  curl -s 'http://localhost:9115/probe?target=10.0.2.11:443&module=tcp_connect' | grep -E '^(probe_success|probe_duration_seconds)'
+  probe_success 0
+  probe_duration_seconds 0.0003
+
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=probe_success{job="blackbox_tls"}'
+  "value":[1715000000,"0"]
+
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=probe_ssl_earliest_cert_expiry'
+  пустой результат
+
+  ssh engineer@10.0.2.11 "sudo ss -ltnp | grep ':443'"
+  (пусто)
+
+ДЕЙСТВИЕ. Два варианта, и оба правильные.
+
+Вариант первый, учебный: закрыть задание. Порт 443 на web1
+в стенде курса не используется, и проверка, которая всегда
+падает, приучает игнорировать оповещения. Убираем задание
+blackbox_tls из конфигурации и перечитываем её.
+
+Вариант второй, как в работе: настроить TLS на web1 и убедиться,
+что проверка стала проходить. Тогда задание остаётся, а отказ
+исчезает сам.
+
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=probe_success{job="blackbox_tls"}'
+  "value":[1715000000,"1"]
+
+ПОЧЕМУ ИМЕННО ТАК: проверка недоступного TLS-порта даёт ровно те
+же наблюдаемые признаки, что и истёкший сертификат: соединение
+не устанавливается, а метрики сертификата отсутствуют. Разница
+в причине, а не в симптоме, и именно поэтому разбор начинается
+с probe_success, а не с даты сертификата.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: правило «сертификат истекает через 14 дней» —
+одно из самых полезных в мониторинге наружных сервисов, потому
+что оно срабатывает заранее. Но у него есть слепое пятно, которое
+здесь и видно: если проверка не доходит до рукопожатия, метрика
+даты не появляется, и правило о сертификате молчит. Поэтому
+на TLS-сервисы ставят два правила: probe_success и дату.
+
+ЧЕГО НЕ ДЕЛАТЬ: не оставляйте в итоговой конфигурации проверку,
+которая заведомо падает. Постоянно горящее critical приучает
+дежурного не читать оповещения вообще, и настоящий отказ
+теряется среди ложных.
+
+=========================================================================
+ШАГ 15. ЧЕК-ЛИСТ ПРИЁМКИ
+=========================================================================
+
+Чек-лист лежит в files/16_final_5day/checklist.md: четырнадцать
+проверяемых пунктов и отдельный раздел «что осталось ручным шагом».
+Проходим его по порядку, не пропуская пункты, которые «и так
+понятны».
+
+Ниже — сокращённый вид: команда и ожидаемый результат.
+
+  1. Prometheus собирает метрики:
+       curl -s 'http://10.0.2.5:9090/api/v1/query?query=sum(up{env="lab"})'
+     Ожидается 7 и больше.
+
+  2. Цели из файла:
+       curl -s 'http://10.0.2.5:9090/api/v1/targets?state=active' | grep -c 'node.json'
+     Ожидается не ноль.
+
+  3. Правила записи вычисляются:
+       curl -s 'http://10.0.2.5:9090/api/v1/query?query=instance:node_cpu_utilization:ratio'
+     Ожидается по ряду на машину.
+
+  4. Правила оповещения здоровы:
+       curl -s 'http://10.0.2.5:9090/api/v1/query?query=increase(prometheus_rule_evaluation_failures_total[10m])'
+     Ожидается пустой результат.
+
+  5. Тесты правил проходят:
+       cd /etc/prometheus && promtool test rules rules/tests/rules.test.yml
+     Ожидается SUCCESS.
+
+  6. Конфигурации разбираются: четыре команды promtool и amtool
+     из шага 10.
+
+  7. Маршрутизация соответствует требованию:
+       amtool config routes show --config.file=/etc/alertmanager/alertmanager.yml
+
+  8. Пробное оповещение доходит:
+       amtool alert add LabTestAlert severity=warning instance=10.0.2.11:9100 \
+         --alertmanager.url=http://localhost:9093 --annotation=summary="проверка канала"
+
+  9. Источник данных и дашборд пришли из файлов: строка про
+     провижининг в журнале Grafana и дашборд с uid
+     lab-fleet-overview.
+
+  10. Свой экспортёр в строю: lab_queue_depth в /metrics
+      и job:lab_queue_depth:avg5m в Prometheus.
+
+  11. Внешняя проверка работает: probe_success по обоим заданиям.
+
+  12. Копия сделана и восстановление проверено.
+
+  13. Службы работают от prometheus, права 600 на alertmanager.yml.
+
+  14. Учебные отказы убраны: файл заполнения удалён, решения
+      по blackbox_tls приняты.
+
+ПРОВЕРКА: чек-лист пройден, если на каждый пункт есть вывод
+команды. «Выполнено» без вывода не считается: именно так
+приёмка превращается в формальность.
+
+=========================================================================
+ШАГ 16. ЧТО ОСТАЛОСЬ РУЧНЫМ ШАГОМ
+=========================================================================
+
+Часть работы в этой практике мы делали руками, и в рабочей среде
+эти шаги должны быть автоматизированы. Перечислим честно.
+
+  * Установка и обновление бинарников. Архивы скачиваются руками,
+    файлы копируются в /usr/local/bin руками. Автоматизируется
+    системой управления конфигурацией или сборкой образа.
+  * Создание учётных записей служб. useradd выполняется один раз
+    и нигде не записан. Автоматизируется той же системой.
+  * Права на каталоги после восстановления. Набор chown и chmod
+    известен и потому переносится в сценарий восстановления.
+  * Создание файла паролей прокси. htpasswd -B спрашивает пароль
+    интерактивно; в конвейер встраивается только через секреты.
+  * Проверка доставки. Доставку письма подтверждает человек.
+    Alertmanager гарантирует повтор, а не доставку, — это его
+    честная граница, разобранная в практике 9.
+  * Сертификаты. На стенде они самоподписанные, в работе —
+    заявка во внешнюю систему с собственным сроком исполнения.
+  * Снимок стенда. Делается средствами гипервизора и в курс
+    не входит.
+
+ПОЧЕМУ ИМЕННО ТАК: список ручных шагов — это и есть план
+автоматизации. Мониторинг, собранный вручную один раз, работает
+до первой переустановки машины. Разница между учебным стендом
+и рабочим не в инструментах, а в том, что на стенде ручные шаги
+допустимы, а в работе — нет.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: этот список стоит того, чтобы унести его
+с курса и повесить рядом с рабочей задачей. Чего в нём нет —
+так это «настроить дашборд»: дашборд мы уже сделали файлом,
+и он восстанавливается вместе с конфигурацией.
+
+=========================================================================
+ШАГ 17. УБОРКА И ИТОГОВЫЙ СНИМОК
+=========================================================================
+
+Убираем за собой всё, что создали для проверок, и оставляем стенд
+в том состоянии, в котором его можно показывать.
+
+  sudo rm -f /tmp/fill-disk.img
+  rm -rf /home/engineer/restore-final
+  rm -f /home/engineer/final-config-*.tar.gz
+  sudo rm -f /etc/prometheus/targets/node.json.restore
+
+Проверим, что учебные отказы убраны:
+
+  df -h / | tail -1
+  ssh engineer@10.0.2.12 "systemctl is-active node_exporter"
+  active
+  curl -s 'http://10.0.2.5:9090/api/v1/query?query=up{env="lab"} == 0'
+  (пусто)
+
+Итоговый снимок виртуальных машин. Он нужен, чтобы вернуться
+к этому состоянию, если стенд понадобится ещё раз: собрать его
+заново из практик 1–16 — это сорок академических часов.
+
+ПОЧЕМУ ИМЕННО ТАК: снимок делается после уборки, а не до неё.
+Снимок с внутри незакрытым учебным отказом однажды будет развёрнут
+как «чистый стенд», и разбор начнётся с вопроса «почему диск
+заполнен».
+
+ПРОВЕРКА: если после уборки хотя бы одна цель в состоянии DOWN,
+уборка не закончена. Единственное допустимое исключение — цель
+win1, если пятой машины в стенде нет: она была необязательной
+с самого начала.
+
+=========================================================================
+ЕСЛИ ЧТО-ТО ПОШЛО НЕ ТАК
+=========================================================================
+
+ПРОБЛЕМА: цели из файла не появились, страница Targets пуста
+
+  Задание node в списке есть, целей у него нет, ошибок
+  в журнале Prometheus тоже нет.
+
+Три причины, и проверяются они по очереди.
+
+  1. Формат файла. file_sd ждёт список объектов с полями targets
+     и labels, а не YAML из static_configs:
+
+     python3 -m json.tool /etc/prometheus/targets/node.json | head
+
+     Если команда падает — файл не JSON. Если в нём словарь
+     вместо списка — обнаружение прочитается и не даст ничего.
+  2. Маска файлов. В конфигурации указано
+     /etc/prometheus/targets/*.json, и файл обязан лежать именно
+     там с расширением .json.
+  3. Права. Файл читает служба от учётной записи prometheus:
+
+     sudo -u prometheus cat /etc/prometheus/targets/node.json | head -1
+
+     При ошибке доступа в журнале будет строка о невозможности
+     прочитать файл обнаружения.
+
+ПОЧЕМУ ИМЕННО ТАК: ошибка прав в file_sd выглядит тише всех
+остальных: Prometheus не падает, предупреждение появляется один раз
+при первом чтении, а страница Targets просто пуста. Права
+проверяются чтением от учётной записи службы, а не глазами.
+
+ПРОБЛЕМА: promtool test rules не находит файл правил
+
+  FAILED: loading test file: rules/tests/rules.test.yml: open ../recording.rules.yml: no such file or directory
+
+Пути внутри тестового файла указываются относительно самого
+тестового файла, а не относительно каталога, из которого запущен
+promtool. Из rules/tests/ файл правила лежит в ../recording.rules.yml.
+Проверяйте:
+
+  1. Структуру каталогов:
+
+     ls -l /etc/prometheus/rules /etc/prometheus/rules/tests
+
+  2. Что в rule_files теста путь именно такой:
+
+     grep -A3 '^rule_files:' /etc/prometheus/rules/tests/rules.test.yml
+
+  3. Что тест запускается из каталога, где эти пути существуют:
+
+     cd /etc/prometheus && promtool test rules rules/tests/rules.test.yml
+
+ПРОБЛЕМА: тест правил падает на значении, а не на метках
+
+  FAILED: unit test failed for promql_expr_test: expected 0.075 but got 0.07500000000000007
+
+Сравнение значений в promtool идёт с плавающей точкой, и результат
+деления двух больших чисел не равен ровно 0.075. Проверяйте:
+
+  1. Не «уточняйте» ожидаемое значение. Правильнее выбрать входные
+     числа, которые делятся без остатка: 400000000 и 40000000 дают
+     ровно 0.1.
+  2. Что в тесте проверяется то, что нужно: для правил оповещения
+     важны метки и имя правила, а точное значение — только в
+     promql_expr_test.
+  3. Что правило записи не переопределено: два правила с одним
+     record в разных группах дадут неожиданный ряд.
+
+ПРОБЛЕМА: дашборд не появился, в журнале Grafana ошибка провижининга
+
+  logger=provisioning.dashboard level=error msg="failed to load dashboard from " file=/var/lib/grafana/dashboards/lab-fleet.json error="invalid character '}' looking for beginning of value"
+
+Файл дашборда — не валидный JSON. Самая частая причина — лишняя
+запятая после последнего элемента списка, которая в YAML безвредна,
+а в JSON запрещена. Проверяйте:
+
+  1. JSON разбором, а не глазами:
+
+     python3 -m json.tool /var/lib/grafana/dashboards/lab-fleet.json > /dev/null && echo ok
+
+  2. Права и владельца: файл читает служба grafana.
+  3. Что провайдер смотрит в тот каталог, где лежит файл:
+
+     grep -A2 'path:' /etc/grafana/provisioning/dashboards/lab.yml
+
+ПРОБЛЕМА: маршрут warning отправляет сообщения чаще раза в час
+
+  Письма по одному и тому же оповещению приходят каждые пять минут.
+
+Перепутаны group_interval и repeat_interval. group_interval — время
+между отправками изменённой группы, repeat_interval — время, после
+которого повторяется отправка неизменившегося оповещения.
+Проверяйте:
+
+  1. Что стоит в маршруте:
+
+     amtool config routes show --config.file=/etc/alertmanager/alertmanager.yml
+
+  2. Не сработал ли родительский маршрут: если у дочернего маршрута
+     не указан repeat_interval, берётся значение из route.
+  3. Не разбивается ли группа: group_by: ["alertname", "instance"]
+     при меняющейся метке instance даёт новую группу на каждое
+     изменение, а значит новую отправку.
+
+ПОЧЕМУ ИМЕННО ТАК: Alertmanager повторяет отправку по расписанию
+группы, а не по факту нового события. Поэтому «сообщение пришло
+дважды» — это чаще всего не ошибка, а работа repeat_interval.
+
+ПРОБЛЕМА: проверка недоступного TLS-порта даёт probe_success 1
+
+  curl -s 'http://localhost:9115/probe?target=10.0.2.11:443&module=tcp_connect' | grep ^probe_success
+  probe_success 1
+
+Значит, порт 443 на web1 кем-то занят — например, там уже настроен
+TLS. Проверяйте:
+
+  1. Кто слушает порт:
+
+     ssh engineer@10.0.2.11 "sudo ss -ltnp | grep ':443'"
+
+  2. Что проверяется именно тот модуль: tcp_connect устанавливает
+     соединение и не проверяет сертификат. Истёкший сертификат
+     на живом порту этим модулем не обнаруживается — для него
+     нужен http_2xx с https в target и правило на дату.
+  3. Что задание blackbox_tls смотрит на тот адрес, который
+     вы проверяете вручную.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: смешение двух проверок — «порт открыт»
+и «сертификат действителен» — самая частая ошибка в правилах
+о сертификатах. Порт может быть открыт, а сертификат просрочен;
+порт может быть закрыт, а сертификат в порядке.
+
+ПРОБЛЕМА: после смены конфигурации оповещения приходят дважды
+
+  Одно и то же оповещение приходит с двумя разными именами:
+  InstanceDown и InstanceDown-legacy.
+
+В rule_files остались файлы правил предыдущих практик, и старые
+правила продолжают вычисляться вместе с новыми. Проверяйте:
+
+  1. Список подключённых файлов:
+
+     grep -A5 '^rule_files:' /etc/prometheus/prometheus.yml
+
+  2. Состояние правил в веб-интерфейсе:
+
+     curl -s 'http://10.0.2.5:9090/api/v1/rules' | grep -o '"name": "[^"]*"' | sort -u
+
+  3. Что старые файлы остались на диске как образец, но не
+     подключены. Это нормально: удалять их не нужно,
+     достаточно убрать из rule_files.
+
+ИСПРАВЛЕНО: в прежней версии курса файл правил был один —
+единственный rules.yml, подключённый через rule_files, и вопроса
+«что делать, если правил стало два» там не возникало. Ошибка,
+о которой здесь речь, относится уже к новой версии: студент
+добавляет второй файл, не убирая первый из rule_files, и получает
+два оповещения об одном событии.
+
+=========================================================================
+ПРОВЕРКА РЕЗУЛЬТАТА
+=========================================================================
+
+Итоговая работа принята, если выполняются все пункты чек-листа
+и, дополнительно, следующее.
+
+1. Ни одна цель не в состоянии DOWN:
+
+     curl -s 'http://10.0.2.5:9090/api/v1/query?query=up{env="lab"} == 0'
+
+   Пустой результат.
+
+2. Версии инструментов не изменились: итоговая работа ничего
+   не обновляет и тег latest не вводит нигде. Проверяется
+   по факту — по версиям запущенных служб:
+
+     curl -s 'http://10.0.2.5:9090/api/v1/status/buildinfo'
+     "version":"3.15.0"
+
+3. Версии закреплены и совпадают с реестром курса:
+
+     prometheus --version | head -1
+     prometheus, version 3.15.0
+     alertmanager --version | head -1
+     alertmanager, version 0.34.1
+     promtool --version | head -1
+     promtool, version 3.15.0
+     amtool --version | head -1
+     amtool, version 0.34.1
+
+4. Число рядов в голове TSDB не выросло скачком после включения
+   правил записи:
+
+     curl -s 'http://10.0.2.5:9090/api/v1/query?query=prometheus_tsdb_head_series'
+
+   Четыре правила записи добавляют единицы рядов, а не тысячи.
+   Если число выросло на порядок — ищите метку с высоким
+   разнообразием, как в практике 14.
+
+5. Три учебных отказа воспроизведены и разобраны, и после каждого
+   стенд возвращён в исходное состояние:
+
+     df -h / | tail -1
+     ssh engineer@10.0.2.12 "systemctl is-active node_exporter"
+     active
+     ls /tmp/fill-disk.img
+     ls: cannot access '/tmp/fill-disk.img': No such file or directory
+
+6. Дашборд открывается, переменные работают, панели показывают
+   данные за последние шесть часов.
+
+7. Чек-лист из files/16_final_5day/checklist.md пройден целиком,
+   и на каждый пункт есть вывод команды.
+
+8. Стенд убран и снимок сделан.
+
+=========================================================================
+ЧТО ДАЛЬШЕ
+=========================================================================
+
+Далее в курсе:
+
+  * приложение 1 — шпаргалка по командам: prometheus, promtool,
+    amtool, curl к экспортёрам, запросы к API, таблицы портов
+    и каталогов стенда;
+  * приложение 2 — частые ошибки: блоки ПРОБЛЕМА из всех практик
+    и порядок диагностики «с чего начать, если данных нет»;
+  * приложение 3 — зеркала и установка в России: что делать,
+    когда официальный хост недоступен.
+
+Дальше за пределами курса:
+
+  * практика 14 — масштаб и хранение: remote_write, который
+    в итоговой конфигурации стоит заглушкой, и федерация;
+  * практика 11 — обнаружение целей: http_sd и dns_sd, следующий
+    шаг после file_sd;
+  * практика 13 — свои экспортёры: экспортёр в строю — это
+    та точка, с которой начинается разработка своих метрик.
+
+ПЕРЕД ПЕРЕХОДОМ уберите за собой:
+
+  sudo rm -f /tmp/fill-disk.img
+  rm -rf /home/engineer/restore-final
+  rm -f /home/engineer/final-config-*.tar.gz
+  ssh engineer@10.0.2.11 "rm -f /home/engineer/final-config-*.tar.gz"
+
+Снимок стенда делается после уборки. Если стенд разворачивался
+под курс с нуля, снимок — единственный способ не собирать его
+заново: сорок академических часов ручной работы не воспроизводятся
+по памяти.

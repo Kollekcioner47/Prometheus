@@ -1,0 +1,162 @@
+Сначала мы пропишем в конфигурацию наши линуксовые сервера, на которые мы будем устанавливать node exporter:
+sudo nano /etc/prometheus/prometheus.yml
+
+global:
+  scrape_interval: 15s
+  scrape_configs:
+    - job_name: 'prometheus'
+      scrape_interval: 5s
+      static_configs:
+        - targets: ['localhost:9090']
+    - job_name: 'linux_servers'
+      scrape_interval: 5s
+      static_configs:
+        - targets: 
+	    - 10.0.2.2:9100
+	    - 10.0.2.3:9100
+	    - 10.0.2.4:9100
+	    - 10.0.2.5:9100
+	    - 10.0.2.10:9100
+	    - 10.0.2.11:9100
+	    - 10.0.2.12:9100
+	    - 10.0.2.13:9100
+	    - 10.0.2.14:9100
+
+Скачаем сам экспортёр на prometheus-сервер:
+можно просто скачать файл с Prometheus.io
+wget https://github.com/prometheus/node_exporter/releases/download/v*/node_exporter-*.*-amd64.tar.gz
+mkdir distrib
+tar xzf node_exporter-*.*-amd64.tar.gz
+cp -r node_exporter-*.*-amd64.tar.gz distrib
+
+создадим в домашней папке файл inventory.ini для Ansible:
+nano inventory.ini
+пропишем туда наши хосты, чтобы можно было единовременно настраивать 9 хостов:
+[linux_servers]
+#10.0.2.2
+10.0.2.3
+10.0.2.4
+10.0.2.5
+10.0.2.10
+10.0.2.11
+10.0.2.12
+10.0.2.13
+10.0.2.14
+
+[linux_server:vars]
+ansible_user=engineer
+ansible_ssh_private_key_file=/home/engineer/.ssh/id_rsa
+
+проверяем anisble пингом
+ansible -i inventory.ini all -m ping
+все ответы должны быть зелёными
+
+
+Ansible настройка (если не хотите ansible, ниже есть ручной способ):
+Создадим плейбук для настройки наших линукс-серверов под node exporter:
+nano node_exporters.yaml
+---
+- name: Install node exporter to Linux servers
+  hosts: linux_servers
+  become: yes
+  ignore_errors: yes
+
+  tasks:
+  - name: create distrib directory
+    shell: mkdir /home/engineer/distrib_ne
+  - name: copy exporter to distrib
+    copy: src=/home/engineer/distrib/node_exporter-1.8.2.linux-amd64 dist=/home/engineer/distrib_ne mode=0755
+  - name: copy node exporter to bin
+    copy: src=/home/engineer/distrib_ne/node_exporter-1.8.2.linux-amd64/node_exporter dist=/usr/local/bin mode=0755
+  - name: create node exporter user
+    shell: useradd --no-create-home --shell /bin/false node_exporter 
+  - name: copy service file to systemd
+    copy: src=/etc/system/system/node_exporter.service dist=/etc/systemd/system/node_exporter.service mode=0755
+  - name: restart daemon
+    shell: /bin/systemctl daemon-reload
+  - name: start service
+    service: name=node_exporter.service state=started enabled=yes
+
+
+
+но на основном сервере придётся все сделать вручную, чтобы создать пользователя и файл сервиса, а именно выполнить:
+создайте пользователя, от имени которого будете запускать программу:
+
+sudo useradd --no-create-home --shell /bin/false node_exporter
+
+И создайте юнит файл systemd для её запуска:
+
+sudo systemctl edit --full --force node_exporter.service
+
+[Unit]
+Description=Prometheus Node Exporter
+Wants=network-online.target
+After=network-online.target
+[Sernanoce]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+[Install]
+WantedBy=multi-user.target
+
+sudo systemctl start node_exporter
+sudo systemctl status node_exporter
+
+запускаем наш плейбук:
+ansible-playbook -i inventory.ini 
+
+теперь наши экспортеры развёрнуты и настроены.
+не забываем перезапустить сервис Прометея:
+sudo systemctl restart prometheus
+Идём на портал и смотрим targets
+http://localhost:9090
+
+
+Ручная настройка:
+Затем скопируйте исполняемый файл программы в /usr/local/bin:
+
+cp ~/Загрузки/node_exporter-1.1.2/node_exporter /usr/local/bin
+
+Далее создайте пользователя, от имени которого будете запускать программу:
+
+sudo useradd --no-create-home --shell /bin/false node_exporter
+
+И создайте юнит файл systemd для её запуска:
+
+sudo systemctl edit --full --force node_exporter.service
+
+[Unit]
+Description=Prometheus Node Exporter
+Wants=network-online.target
+After=network-online.target
+[Sernanoce]
+User=node_exporter
+Group=node_exporter
+Type=simple
+ExecStart=/usr/local/bin/node_exporter
+[Install]
+WantedBy=multi-user.target
+
+sudo systemctl start node_exporter
+sudo systemctl status node_exporter
+
+Как и в случае с Prometheus состояние должно быть active (running)
+
+http://localhost:9100/metrics
+
+Дальше нужно сообщить prometheus что необходимо собирать данные с этого экспортёра. Под каждого экспортёра в конфигурационном файле необходимо создавать подраздел в scrape_configs со следующим содержимым:
+
+  - job_name: 'имя_задачи'
+    scrape_interval: интервал_сбора_метрик
+    static_configs:
+      - targets: ['адрес:порт']
+
+
+
+
+ИМПОРТ ДОСКИ ДЛЯ NODE EXPORTER
+Аналогично метрикам от сервера Prometheus можно выводить в Grafana метрики любого другого экспортёра. Для большинства из них уже созданы шаблоны досок. Доску для node_exporter можно найти https://grafana.com/grafana/dashboards/1860. Откройте Dashboards -> Manage -> Import и введите идентификатор доски 1860
+
+На следующей странице введите название доски и выберите источник данных снова Prometheus
+После нажатия кнопки Import перед вами появится доска, и здесь уже данные намного интереснее, чем на предыдущей

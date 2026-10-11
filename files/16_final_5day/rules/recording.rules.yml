@@ -1,0 +1,49 @@
+# Правила записи итоговой работы. Практика 16.
+#
+# Правило записи вычисляется по тому же расписанию, что и правила
+# оповещения: evaluation_interval равен 15s. Имя правила собрано
+# из трёх частей через двоеточия: level:metric:operations.
+#
+# Каждое правило здесь нужно не «для красоты»: дашборд итоговой
+# работы строится именно на этих четырёх рядах, а не на сырых
+# метриках. Разница видна по времени ответа панели.
+
+groups:
+  - name: lab.recording
+    interval: 15s
+    rules:
+      # Загрузка процессора: доля занятого времени по каждой машине.
+      # Считается по пятиминутному окну, поэтому скачок на одну
+      # выборку не превращается в скачок на графике.
+      - record: instance:node_cpu_utilization:ratio
+        expr: |
+          1 - avg by (instance) (
+            rate(node_cpu_seconds_total{mode="idle"}[5m])
+          )
+
+      # Доля доступной памяти. Именно доля, а не байты: порог
+      # «меньше 10 процентов» одинаков для машин с 2 и с 4 ГБ.
+      - record: instance:node_memory_available:ratio
+        expr: |
+          node_memory_MemAvailable_bytes
+          /
+          node_memory_MemTotal_bytes
+
+      # Доля занятого места на разделе. Отбираются только
+      # настоящие файловые системы: tmpfs, overlay и squashfs
+      # к дискам машины отношения не имеют.
+      - record: instance:node_filesystem_used:ratio
+        expr: |
+          1 - (
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}
+            /
+            node_filesystem_size_bytes{fstype!~"tmpfs|overlay|squashfs"}
+          )
+
+      # Загрузка своего экспортёра из практики 13: сколько заданий
+      # в очереди в среднем за пять минут. Правило записи на своих
+      # метриках нужен, чтобы дашборд не зависел от того, жив ли
+      # экспортёр прямо сейчас.
+      - record: job:lab_queue_depth:avg5m
+        expr: |
+          avg_over_time(lab_queue_depth{job="lab_exporter"}[5m])

@@ -1,0 +1,27 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: lab
+    monitor: prometheus-01
+
+storage:
+  tsdb:
+    retention:
+      time: 15d
+
+scrape_configs:
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  - job_name: node
+    static_configs:
+      - targets:
+          - 10.0.2.5:9100
+          - 10.0.2.11:9100
+          - 10.0.2.12:9100
+          - 10.0.2.13:9100
+        labels:
+          env: lab

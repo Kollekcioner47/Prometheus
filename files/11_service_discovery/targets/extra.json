@@ -1,0 +1,11 @@
+[
+  {
+    "targets": [
+      "10.0.2.13:8080"
+    ],
+    "labels": {
+      "env": "lab",
+      "role": "docker"
+    }
+  }
+]

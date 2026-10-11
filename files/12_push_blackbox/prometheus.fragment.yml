@@ -1,0 +1,45 @@
+# Фрагмент scrape_configs из /etc/prometheus/prometheus.yml.
+# Это не полная конфигурация Prometheus: только scrape_configs.
+# Глобальные настройки (scrape_interval, external_labels)
+# и раздел alerting остаются в prometheus.yml.
+
+scrape_configs:
+
+  # Pushgateway — обычная цель, ничем не отличающаяся от
+  # node_exporter. Prometheus ходит в него сам, по расписанию;
+  # push-модель заканчивается на пороге Pushgateway.
+  - job_name: pushgateway
+    honor_labels: true
+    static_configs:
+      - targets:
+          - localhost:9091
+        labels:
+          env: lab
+
+  # Проверки извне. Здесь видно, зачем нужна перемаркировка:
+  # адрес blackbox_exporter один, а проверяемых целей много.
+  # Цель из static_configs подменяется: в __param_target уходит
+  # имя проверяемого объекта, а в __address__ — адрес blackbox.
+  - job_name: blackbox_http
+    metrics_path: /probe
+    params:
+      module:
+        - http_2xx
+    static_configs:
+      - targets:
+          - https://prometheus.io
+          - http://10.0.2.11
+        labels:
+          env: lab
+    relabel_configs:
+      # Проверяемая цель становится значением параметра target.
+      - source_labels: [__address__]
+        target_label: __param_target
+      # А в instance кладём её же: иначе в ряду оказался бы
+      # адрес blackbox_exporter, одинаковый для всех проверок.
+      - source_labels: [__param_target]
+        target_label: instance
+      # Адрес, по которому Prometheus пойдёт за метриками, —
+      # это blackbox_exporter, а не проверяемый объект.
+      - target_label: __address__
+        replacement: 10.0.2.5:9115

@@ -1,0 +1,418 @@
+{
+  "title": "Lab: состояние парка",
+  "uid": "lab-fleet-overview",
+  "version": 3,
+  "editable": false,
+  "graphTooltip": 1,
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "refresh": "30s",
+  "tags": [
+    "lab",
+    "prometheus"
+  ],
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "templating": {
+    "list": [
+      {
+        "name": "job",
+        "label": "Задание",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "lab-prometheus"
+        },
+        "query": {
+          "query": "label_values(up{env=\"lab\"}, job)",
+          "refId": "lab-job"
+        },
+        "refresh": 1,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      },
+      {
+        "name": "instance",
+        "label": "Экземпляр",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "lab-prometheus"
+        },
+        "query": {
+          "query": "label_values(up{env=\"lab\", job=~\"$job\"}, instance)",
+          "refId": "lab-instance"
+        },
+        "refresh": 2,
+        "includeAll": true,
+        "multi": true,
+        "current": {
+          "text": "All",
+          "value": "$__all"
+        }
+      }
+    ]
+  },
+  "annotations": {
+    "list": [
+      {
+        "name": "Оповещения",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "lab-prometheus"
+        },
+        "enable": true,
+        "iconColor": "red",
+        "expr": "ALERTS{env=\"lab\", alertstate=\"firing\"} == 1",
+        "tagKeys": "alertname,severity",
+        "titleFormat": "{{ alertname }}",
+        "textFormat": "{{ severity }}"
+      }
+    ]
+  },
+  "panels": [
+    {
+      "id": 1,
+      "type": "stat",
+      "title": "Цели в состоянии UP",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lab-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 6,
+        "x": 0,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "sum(up{env=\"lab\", job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "up"
+        },
+        {
+          "refId": "B",
+          "expr": "count(up{env=\"lab\", job=~\"$job\", instance=~\"$instance\"})",
+          "legendFormat": "всего"
+        }
+      ],
+      "options": {
+        "colorMode": "value",
+        "graphMode": "none",
+        "textMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Загрузка процессора",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lab-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 18,
+        "x": 6,
+        "y": 0
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "instance:node_cpu_utilization:ratio{instance=~\"$instance\"}",
+          "legendFormat": "{{ instance }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "pointSize": 5,
+            "showPoints": "auto"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Свободное место на разделах",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lab-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 0,
+        "y": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "instance:node_filesystem_used:ratio{instance=~\"$instance\"}",
+          "legendFormat": "{{ instance }} {{ mountpoint }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "decimals": 2,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 0,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 0.8
+              },
+              {
+                "color": "red",
+                "value": 0.9
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom",
+          "calcs": [
+            "lastNotNull",
+            "max"
+          ]
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "Свободная память",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lab-prometheus"
+      },
+      "gridPos": {
+        "h": 7,
+        "w": 12,
+        "x": 12,
+        "y": 6
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "instance:node_memory_available:ratio{instance=~\"$instance\"}",
+          "legendFormat": "{{ instance }}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "custom": {
+            "drawStyle": "line",
+            "lineWidth": 1,
+            "fillOpacity": 10,
+            "showPoints": "never"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 0.2
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "table",
+      "title": "Очередь своего экспортёра (практика 13)",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lab-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 0,
+        "y": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "job:lab_queue_depth:avg5m",
+          "format": "table",
+          "instant": true
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "align": "auto",
+            "cellOptions": {
+              "type": "auto"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showHeader": true
+      }
+    },
+    {
+      "id": 6,
+      "type": "state-timeline",
+      "title": "Состояние внешних проверок",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "lab-prometheus"
+      },
+      "gridPos": {
+        "h": 6,
+        "w": 12,
+        "x": 12,
+        "y": 13
+      },
+      "targets": [
+        {
+          "refId": "A",
+          "expr": "probe_success{env=\"lab\"}",
+          "legendFormat": "{{ job }} {{ instance }}"
+        }
+      ],
+      "options": {
+        "mergeValues": true,
+        "showValue": "never",
+        "rowHeight": 0.9,
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        }
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      }
+    }
+  ]
+}

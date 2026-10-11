@@ -1,0 +1,66 @@
+# files/07_containers/prometheus.fragment.yml
+#
+# Практика 7, шаг 5. Файл играет две роли, и это стоит различать.
+#
+# НА СТЕНДЕ он показывает, как выглядит рабочая конфигурация
+# Prometheus на машине mon после добавления задания docker: задание
+# дописывается в секцию scrape_configs файла
+# /etc/prometheus/prometheus.yml. Перед перезагрузкой конфигурации:
+#
+#   promtool check config /etc/prometheus/prometheus.yml
+#
+# В СТЕКЕ DOCKER COMPOSE этот же файл монтируется в контейнер как
+# полноценный /etc/prometheus/prometheus.yml, поэтому в нём есть
+# и global, и rule_files, и storage. Отдельного файла для compose
+# в курсе нет намеренно: конфигурация должна быть одна.
+#
+# Внешние метки берутся из реестра сущностей курса: env=lab,
+# host=имя хоста, monitor=prometheus-01.
+
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: lab
+    host: mon
+    monitor: prometheus-01
+
+rule_files:
+  - /etc/prometheus/rules/*.yml
+
+storage:
+  tsdb:
+    retention:
+      time: 15d
+
+scrape_configs:
+
+  # Метрики самого Prometheus. Без метки env: это единственное задание,
+  # у которого её нет, — так заведено в реестре сущностей курса.
+  - job_name: prometheus
+    static_configs:
+      - targets:
+          - localhost:9090
+
+  # Машины стенда: node_exporter из практики 2.
+  - job_name: node
+    static_configs:
+      - targets:
+          - 10.0.2.5:9100
+          - 10.0.2.11:9100
+          - 10.0.2.12:9100
+          - 10.0.2.13:9100
+        labels:
+          env: lab
+
+  # Контейнеры на app1: cAdvisor слушает порт 8080.
+  # Метка instance у цели станет 10.0.2.13:8080, метка job — docker.
+  # Никаких дополнительных меток не нужно: cAdvisor отдаёт метки
+  # name, image и id в самих метриках, и перемаркировка здесь была бы
+  # лишним шагом (она разбирается в практике 11).
+  - job_name: docker
+    static_configs:
+      - targets:
+          - 10.0.2.13:8080
+        labels:
+          env: lab

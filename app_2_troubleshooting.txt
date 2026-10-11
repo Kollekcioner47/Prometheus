@@ -1,0 +1,1601 @@
+ПРИЛОЖЕНИЕ 2. ЧАСТЫЕ ОШИБКИ И ЧТО С НИМИ ДЕЛАТЬ
+
+ЭТО СПРАВОЧНИК, А НЕ УЧЕБНИК. Здесь собраны ошибки, которые студенты
+курса «Мониторинг на Prometheus и Grafana» видят на стенде: из секций
+«Если что-то пошло не так» всех шестнадцати практик и из шагов,
+где ошибка заметна только в выводе. Найдите свой симптом, прочитайте
+причину и порядок проверки.
+
+КАК ЗДЕСЬ УСТРОЕН КАЖДЫЙ РАЗБОР. Блок начинается строкой ПРОБЛЕМА
+с точным текстом ошибки или с описанием симптома, если служба молчит
+и ничего не печатает. Дальше идут причина и порядок проверки: что
+смотреть первым, что вторым. Команды для проверки — в отступе,
+их можно копировать в терминал как есть.
+
+ТЕКСТ ОШИБКИ ПРИВЕДЁН КАК ЕСТЬ, на английском. Искать в поиске
+нужно именно его, а не перевод. Пометка «Практика N» указывает,
+где ошибка разбирается полностью.
+
+ВЕРСИИ. Курс собран на Prometheus 3.15.0, Alertmanager 0.34.1,
+node_exporter 1.12.1, blackbox_exporter 0.29.0, Pushgateway 1.11.4,
+Grafana OSS 12.0.10, windows_exporter 0.31.5, Ubuntu 26.04 LTS.
+В другой версии текст сообщения может отличаться на слово, а причина
+и порядок проверки — те же.
+
+ПОМЕТКА ИСПРАВЛЕНО встречается у ошибок из прежней версии курса.
+Она объясняет, почему старый пример так себя ведёт, — чтобы тот же
+разбор не пришлось делать дважды.
+
+
+#########################################################################
+ЧАСТЬ 1. YAML И КОНФИГУРАЦИЯ PROMETHEUS
+#########################################################################
+
+
+=========================================================================
+1.1. РАЗБОРЩИК YAML
+=========================================================================
+
+ПРОБЛЕМА: invalid YAML: mapping values are not allowed in this context
+
+Разборщик остановился на двоеточии и не ожидал здесь значения словаря.
+Это сообщение про двоеточие, а не про отступ, хотя причина чаще всего
+в отступе: строка сдвинута глубже или мельче, чем нужно. Второй
+по частоте случай — двоеточие внутри значения без кавычек.
+
+Порядок проверки: сначала строка из сообщения, потом её соседи
+и только потом весь файл. Практика 2.
+
+  promtool check config /etc/prometheus/prometheus.yml
+  sed -n '1,40p' /etc/prometheus/prometheus.yml
+  awk 'NR>=8 && NR<=14 {printf "%d:%s\n", NR, $0}' /etc/prometheus/prometheus.yml
+
+Проверить, что в строке нет лишнего двоеточия в значении:
+  grep -n ':.*:.*:' /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: while scanning a quoted scalar... found unexpected end of stream
+
+Кавычка не закрыта, и YAML читает остаток файла как одну строку.
+Номер строки в сообщении указывает на начало значения, а не на конец
+файла, поэтому искать нужно выше, а не рядом.
+
+Порядок проверки: сосчитать кавычки в подозрительном диапазоне,
+затем посмотреть хвост файла. Практика 2.
+
+  grep -c '"' /etc/prometheus/prometheus.yml
+  grep -n "annotation\|summary\|description" /etc/prometheus/rules.yml
+  tail -5 /etc/prometheus/rules.yml
+
+ПРОБЛЕМА: did not find expected key
+
+Структура не сходится: отступ не кратен двум, список начат там, где
+ожидался словарь, или в отступе стоит табуляция. Табуляция в YAML
+запрещена и глазом от пробелов не отличается.
+
+Порядок проверки: табы, потом отступы. Практика 2.
+
+  grep -Pn "\t" /etc/prometheus/prometheus.yml
+  sed -n '1,40p' /etc/prometheus/prometheus.yml | cat -A | grep '\^I'
+  python3 -c "import yaml,sys; yaml.safe_load(open(sys.argv[1]))" /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: field scrape_interval not found in type config.plain
+
+Ключ написан на неверном уровне или с опечаткой в имени. Prometheus
+не игнорирует незнакомые поля молча: он падает при загрузке, и это
+лучше, чем тихо работать не так, как задумано.
+
+Порядок проверки: сверить написание ключей с примером, потом
+проверить уровень вложенности. Практика 2.
+
+  grep -n 'scrape_interval\|evaluation_interval\|external_labels' /etc/prometheus/prometheus.yml
+  sed -n '1,15p' /etc/prometheus/prometheus.yml
+
+Частая причина — static_configs вложен внутрь global:
+  grep -n -A3 'global:' /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: err="Loading configuration file failed"
+
+Так выглядит строка в логе Prometheus, когда конфигурация не принята
+при старте или при перезагрузке. Сама причина напечатана в той же
+строке после err=, и читать нужно её, а не первую половину.
+
+Порядок проверки: полная строка лога, потом promtool, потом права
+на файл. Практики 1 и 2.
+
+  journalctl -u prometheus -n 30 --no-pager
+  journalctl -u prometheus --since '5 min ago' | grep -i 'loading configuration'
+  promtool check config /etc/prometheus/prometheus.yml
+  ls -l /etc/prometheus/prometheus.yml
+
+Ожидаемая строка при успешной перезагрузке:
+  msg="Loading configuration file" filename=/etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: scrape_interval: 15 — интервал стал нулевым
+
+Ошибки в выводе нет: Prometheus принимает число и трактует его как
+наносекунды. Сбор идёт непрерывно, диск растёт, цели уходят в DOWN
+по таймауту, а сообщения об ошибке не появляется.
+
+Порядок проверки: поле scrape_interval в конфигурации, потом значение
+в работающем сервере. Практика 2.
+
+  grep -n 'scrape_interval\|evaluation_interval\|retention' /etc/prometheus/prometheus.yml
+  curl -s http://localhost:9090/api/v1/status/config | grep -o 'scrape_interval[^,]*'
+
+ИСПРАВЛЕНО: в прежней версии курса было scrape_interval: 15 без буквы s.
+Тогда это выглядело безобидно, потому что следующая строка всё равно
+перекрывала настройку. Сейчас значение уходит прямо в сервер.
+
+Правильно так:
+  global:
+    scrape_interval: 15s
+    evaluation_interval: 15s
+
+
+=========================================================================
+1.2. ПРАВА И КАТАЛОГИ
+=========================================================================
+
+ПРОБЛЕМА: status=200/CHDIR, Permission denied на /var/lib/prometheus
+
+systemd не смог войти в рабочий каталог службы: каталог данных
+принадлежит root, а служба работает от учётной записи prometheus.
+Это самый частый отказ стенда, и он выглядит как ошибка конфигурации,
+хотя конфигурация цела.
+
+Порядок проверки: владелец каталога, потом строка ExecStart.
+Практики 1 и 14.
+
+  ls -ld /var/lib/prometheus /etc/prometheus
+  sudo chown -R prometheus:prometheus /var/lib/prometheus
+  systemctl show -p User -p ExecStart prometheus
+  journalctl -u prometheus -n 20 --no-pager
+
+То же самое для остальных служб стенда:
+  sudo chown -R prometheus:prometheus /var/lib/alertmanager /etc/alertmanager
+
+ПРОБЛЕМА: Error opening storage: create block: permission denied
+
+Файлы TSDB остались от прошлого запуска под root: после копирования
+каталога или восстановления из архива владелец поменялся. Prometheus
+не может ни читать блоки, ни создавать новые.
+
+Порядок проверки: владелец и права на содержимое каталога, затем
+запуск. Практика 14.
+
+  ls -la /var/lib/prometheus | head -20
+  sudo chown -R prometheus:prometheus /var/lib/prometheus
+  sudo systemctl restart prometheus
+  journalctl -u prometheus -n 20 --no-pager | grep -i 'storage\|permission'
+
+ПРОБЛЕМА: bind: address already in use
+
+Порт занят: чаще всего уже запущена вторая копия той же службы, или
+Prometheus запущен руками в терминале и держит 9090, или на 3000
+поднят Compose-стек с Grafana из практики 7.
+
+Порядок проверки: кто слушает порт, потом запущенные копии процесса.
+Практики 1 и 7.
+
+  sudo ss -lntp | grep -E ':(3000|9090|9093|9100)'
+  ps aux | grep -v grep | grep prometheus
+  docker ps --format '{{.Names}}\t{{.Ports}}'
+
+ЧЕГО НЕ ДЕЛАТЬ: убивать процесс kill -9 по первому совпадению.
+Сначала убедитесь, что это именно ваша копия, а не служба под systemd.
+
+ПРОБЛЕМА: promtool: command not found
+
+promtool лежит в том же архиве, что и prometheus, и был распакован
+в каталог загрузки, но не скопирован в /usr/local/bin. Либо копия
+сделана без бита выполнения.
+
+Порядок проверки: наличие файла, потом права, потом PATH. Практики 1
+и 8.
+
+  ls -l /usr/local/bin/promtool
+  echo $PATH
+  sudo install -m 0755 /home/engineer/distr/prometheus-3.15.0.linux-amd64/promtool /usr/local/bin/
+  promtool --version
+
+ПРОБЛЕМА: amtool: command not found
+
+То же самое для Alertmanager: amtool копируется из архива 0.34.1.
+
+  ls -l /usr/local/bin/amtool
+  sudo install -m 0755 /home/engineer/distr/alertmanager-0.34.1.linux-amd64/amtool /usr/local/bin/
+  amtool --version
+
+
+#########################################################################
+ЧАСТЬ 2. ЦЕЛИ И СБОР МЕТРИК
+#########################################################################
+
+
+=========================================================================
+2.1. ЦЕЛЬ НЕ СОБИРАЕТСЯ
+=========================================================================
+
+ПРОБЛЕМА: цель в состоянии DOWN, в колонке Error — connection refused
+
+Запрос дошёл до машины, но на порту никто не слушает: экспортёр
+не запущен, слушает только localhost или упал. Это утверждение
+о связи, а не о машине: сама машина может быть вполне жива.
+
+Порядок проверки: цель в Targets, затем порт на целевой машине,
+затем сам экспортёр. Практика 2.
+
+  curl -s http://10.0.2.11:9100/metrics | head
+  ssh engineer@10.0.2.11 'ss -lntp | grep 9100'
+  ssh engineer@10.0.2.11 'systemctl status node_exporter'
+  journalctl -u node_exporter -n 20 --no-pager
+
+Проверить со стороны Prometheus, а не со своей машины:
+  curl -v http://10.0.2.11:9100/metrics
+
+ПРОБЛЕМА: цель в состоянии DOWN, в колонке Error — context deadline exceeded
+
+Соединение не устанавливается вовремя. Обычно это брандмауэр, который
+молча роняет пакеты, либо экспортёр отвечает дольше scrape_timeout.
+Отказ по таймауту выглядит иначе, чем connection refused, и это
+подсказка: порт, скорее всего, закрыт фильтром.
+
+Порядок проверки: таймаут, потом правила брандмауэра, потом нагрузка
+на цель. Практики 2, 6 и 7.
+
+  curl -m 5 -v http://10.0.2.21:9182/metrics
+  ssh engineer@10.0.2.11 'sudo ufw status verbose'
+  grep -n 'scrape_timeout' /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: up равно 0 при живом экспортёре
+
+Классика стенда: экспортёр запущен и отвечает на самой машине, но
+слушает только 127.0.0.1, поэтому сбор с mon не проходит. Вторая
+причина — метка instance не совпадает с той, по которой вы смотрите,
+и вы проверяете не тот ряд.
+
+Порядок проверки: адрес прослушивания, потом брандмауэр, потом
+именно тот ряд, что в Targets. Практика 2.
+
+  ssh engineer@10.0.2.11 'ss -lntp | grep 9100'
+  ssh engineer@10.0.2.11 'sudo ufw allow 9100/tcp'
+  curl -s 'http://localhost:9090/api/v1/query?query=up{job="node"}' | python3 -m json.tool
+
+Проверить, что видит Prometheus, а не ваша машина:
+  curl -s http://10.0.2.5:9100/metrics | head -3
+
+ПРОБЛЕМА: INVALID — "is not a valid start token"
+
+Prometheus не смог разобрать ответ экспортёра: он отдал не формат
+exposition, а HTML или JSON. Так ведёт себя страница ошибки, редирект
+на авторизацию или чужой сервис на этом порту.
+
+Порядок проверки: первые строки ответа, потом код ответа, потом
+metrics_path в задании. Практика 2.
+
+  curl -s http://10.0.2.13:8080/metrics | head -5
+  curl -s -o /dev/null -w '%{http_code} %{content_type}\n' http://10.0.2.13:8080/metrics
+  grep -n -A5 'job_name: docker' /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: duplicate label names
+
+Одна и та же метка задана дважды: например, в static_configs и в
+labels того же задания, или метка instance переопределена вручную
+там, где её задаёт Prometheus. Prometheus отвергает конфигурацию,
+а не выбирает одно из значений.
+
+Порядок проверки: метки задания, потом блок labels целиком.
+Практики 2 и 11.
+
+  grep -n -A10 'static_configs' /etc/prometheus/prometheus.yml
+  promtool check config /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: targets пустой, а в Targets написано 0 / 4 active targets
+
+Конфигурация синтаксически верна, но ни одна цель не попала в сбор:
+targets пуст, отступ съел список, или file_sd не нашёл файл. Опасный
+случай: promtool говорит SUCCESS, а собирать нечего.
+
+Порядок проверки: страница Targets, потом Targets dropped, потом
+сам блок конфигурации. Практики 2 и 11.
+
+  curl -s 'http://localhost:9090/api/v1/targets?state=dropped' | python3 -m json.tool | head -40
+  grep -n -A8 'static_configs' /etc/prometheus/prometheus.yml
+  sed -n '1,30p' /etc/prometheus/targets/node.json
+
+ПРОБЛЕМА: file_sd не видит файл, в логе permission denied
+
+Файл обнаружения целей читает служба под учётной записью prometheus,
+а файл создан студентом под engineer с правами 600. Права на каталог
+при этом тоже должны позволять обход.
+
+Порядок проверки: права на файл, потом на каталог, потом
+refresh_interval. Практика 11.
+
+  ls -l /etc/prometheus/targets/node.json
+  sudo chown prometheus:prometheus /etc/prometheus/targets/node.json
+  sudo chmod 644 /etc/prometheus/targets/node.json
+  journalctl -u prometheus -n 30 --no-pager | grep -i 'file_sd\|permission'
+
+ПРОБЛЕМА: цель исчезла из Targets после relabel_configs
+
+Перемаркировка выбросила цель: действие keep не совпало ни с одной
+меткой, либо regex написан по правилам PCRE, а Prometheus использует
+RE2. В RE2 нет обратных ссылок и опережающих проверок.
+
+Порядок проверки: страница Service Discovery, потом действие keep,
+потом regex. Практика 11.
+
+  curl -s http://localhost:9090/api/v1/targets?state=dropped | python3 -m json.tool
+  grep -n -B2 -A12 'relabel_configs' /etc/prometheus/prometheus.yml
+  promtool check config /etc/prometheus/prometheus.yml
+
+Проверить regex отдельно от Prometheus:
+  echo '10.0.2.11:9100' | grep -E '^10\.0\.2\.(11|12):9100$'
+
+
+#########################################################################
+ЧАСТЬ 3. PROMQL
+#########################################################################
+
+
+=========================================================================
+3.1. ОШИБКИ ВЫРАЖЕНИЙ
+=========================================================================
+
+ПРОБЛЕМА: Error executing query: invalid expression type "range vector" for range query
+
+В поле запроса стоит диапазонный вектор там, где нужен мгновенный:
+node_load1[5m] вместо node_load1. Скобки с длительностью дают не одно
+значение, а набор точек, и показать его на графике нельзя.
+
+Порядок проверки: убрать [5m] для простого просмотра, а если нужна
+скорость — обернуть в функцию. Практика 3.
+
+  # неверно на вкладке Graph
+  node_load1[5m]
+
+  # верно: либо без диапазона, либо через функцию
+  node_load1
+  avg_over_time(node_load1[5m])
+  rate(node_cpu_seconds_total{mode="idle"}[5m])
+
+ПРОБЛЕМА: parse error: unexpected end of input
+
+Выражение обрезано: не закрыта скобка, потеряна кавычка или запятая.
+Оболочка тоже участвует — в curl фигурные скобки нужно защищать
+кавычками, иначе запрос уходит в Prometheus уже сломанным.
+
+Порядок проверки: сосчитать скобки, потом кавычки, потом передать
+запрос через --data-urlencode. Практики 3 и 4.
+
+  curl -s --data-urlencode 'query=rate(node_cpu_seconds_total{mode="idle"}[5m])' http://localhost:9090/api/v1/query
+
+  # неверно: оболочка съест скобки и кавычки
+  curl -s 'http://localhost:9090/api/v1/query?query=rate(node_cpu_seconds_total{mode="idle"}[5m])'
+
+ПРОБЛЕМА: many-to-many matching not allowed: matching labels must be unique on one side
+
+Два вектора с разными наборами меток делят друг друга, и Prometheus
+не знает, как сопоставить ряды. Типичный случай: слева сумма по
+instance, справа тоже несколько рядов на один instance.
+
+Порядок проверки: посмотреть оба операнда по отдельности, привести
+их к одной размерности, затем добавить on() и group_left. Практика 4.
+
+  # неверно: слева один ряд на instance, справа несколько
+  sum by (instance) (up) / count by (instance) (up)
+
+  # верно: явно указать, по чему сопоставлять
+  sum by (instance) (up) / on(instance) group_left count by (instance) (up)
+
+Проверить каждый операнд отдельно:
+  count by (instance) (node_cpu_seconds_total)
+  count by (instance) (up)
+
+ПРОБЛЕМА: vector cannot contain metrics with the same labelset
+
+Одна операция or собрала два ряда с одинаковым набором меток: обычно
+это запрос к двум заданиям, где сами метки совпали, а различие было
+только в имени метрики и потерялось после агрегации.
+
+Порядок проверки: что именно складывается оператором or, затем
+добавить различающую метку. Практика 4.
+
+  # неверно: два задания дают одинаковый labelset
+  up{job="node"} or up{job="nginx"}
+
+  # верно: сохранить различие по job
+  up{job="node"} or on(job, instance) up{job="nginx"}
+
+ПРОБЛЕМА: expected type instant vector in aggregation expression
+
+Внутри агрегации оказался диапазонный вектор: sum(node_load1[5m]) —
+так нельзя, потому что sum складывает значения, а не наборы точек.
+
+Порядок проверки: обернуть диапазон в функцию и только потом
+агрегировать. Практика 4.
+
+  # неверно
+  avg(node_load1[5m])
+
+  # верно
+  avg(avg_over_time(node_load1[5m]))
+  sum by (instance) (rate(node_network_receive_bytes_total[5m]))
+
+ПРОБЛЕМА: пустой результат у верного на вид запроса
+
+Ошибки нет, а данных нет. Три причины по частоте: диапазон времени
+в браузере не покрывает данные (Prometheus только что поставлен),
+окно rate() короче двух интервалов сбора, либо фильтр по метке
+не совпал ни с одной серией.
+
+Порядок проверки: сначала запрос без фильтров, потом селектор
+по меткам, потом окно функции. Практики 3 и 4.
+
+  node_load1
+  node_load1{instance="10.0.2.11:9100"}
+  rate(node_cpu_seconds_total{mode="idle"}[1m])
+
+Проверить, какие метки реально есть:
+  curl -s http://localhost:9090/api/v1/labels | python3 -m json.tool
+  curl -s http://localhost:9090/api/v1/label/instance/values | python3 -m json.tool
+
+ПРОБЛЕМА: rate() на первой точке даёт пустоту, а не ноль
+
+Это не ошибка. rate() требует минимум двух точек внутри диапазона:
+на только что запущенном экспортёре ряд пуст, пока не набралось
+две точки. Обещать ноль здесь нельзя — пусто и ноль означают разное,
+и на этом различии строятся правила через absent().
+
+Порядок проверки: сколько точек в ряду, потом окно функции.
+Практика 4.
+
+  count_over_time(node_cpu_seconds_total{mode="idle"}[1m])
+  rate(node_cpu_seconds_total{mode="idle"}[1m])
+
+ПРОБЛЕМА: histogram_quantile возвращает NaN
+
+Квантиль считается по бакетам, а метка le потерялась: её срезала
+агрегация без by (le) или перемаркировка. Без le функция не знает
+границ бакетов и честно возвращает NaN.
+
+Порядок проверки: есть ли le в промежуточном выражении, потом
+агрегация sum by (le). Практики 4 и 13.
+
+  rate(lab_job_duration_seconds_bucket[5m])
+  sum by (le) (rate(lab_job_duration_seconds_bucket[5m]))
+  histogram_quantile(0.95, sum by (le) (rate(lab_job_duration_seconds_bucket[5m])))
+
+ПРОБЛЕМА: деление на ноль даёт Inf или NaN на графике
+
+Знаменатель равен нулю: обычно это метрика, которой на части машин
+нет, или счётчик, который ещё не начал расти. Арифметика в PromQL
+не бросает исключение, она возвращает +Inf или NaN, и график
+выглядит сломанным без единого сообщения об ошибке.
+
+Порядок проверки: посмотреть знаменатель отдельно. Практика 4.
+
+  node_memory_MemTotal_bytes
+  node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes
+
+Защититься от нуля можно так:
+  node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes > 0
+
+
+=========================================================================
+3.2. ЧТЕНИЕ РЕЗУЛЬТАТА
+=========================================================================
+
+ПРОБЛЕМА: запрос возвращает миллион строк и браузер зависает
+
+Запрос без агрегации по большой метрике: node_cpu_seconds_total даёт
+столько рядов, сколько ядер на всех машинах, умноженное на число
+режимов. Вкладка Graph рисует их все, и это не ошибка Prometheus,
+а ошибка запроса.
+
+Порядок проверки: добавить агрегацию, потом ограничить topk.
+Практики 3 и 4.
+
+  count(node_cpu_seconds_total)
+  topk(5, count by (instance) (node_cpu_seconds_total))
+  sum by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))
+
+ПРОБЛЕМА: одна и та же метрика на одной машине видна дважды
+
+Две цели указывают на один и тот же экспортёр: например, адрес
+попал и в static_configs, и в file_sd, или машина добавлена в задание
+node дважды. Prometheus собирает обе цели, и в результате два ряда
+с разными метками job или instance.
+
+Порядок проверки: страница Targets, поиск дубликатов адреса, затем
+список целей в файле обнаружения. Практики 2 и 11.
+
+  curl -s http://localhost:9090/api/v1/targets | grep -o '"scrapeUrl":"[^"]*"' | sort | uniq -d
+  grep -n '10.0.2.11:9100' /etc/prometheus/prometheus.yml
+  grep -rn '10.0.2.11:9100' /etc/prometheus/targets/
+
+
+#########################################################################
+ЧАСТЬ 4. ПРАВИЛА ЗАПИСИ И ОПОВЕЩЕНИЯ
+#########################################################################
+
+
+=========================================================================
+4.1. ПРАВИЛА НЕ ЧИТАЮТСЯ
+=========================================================================
+
+ПРОБЛЕМА: group "lab" has invalid rules
+
+В группе правил нарушена структура: у правила нет expr, или указаны
+одновременно record и alert, или запись попала не в тот уровень
+вложенности. Сообщение называет группу, но не строку, поэтому
+смотреть нужно все правила группы.
+
+Порядок проверки: promtool check rules, затем разбор группы целиком.
+Практика 8.
+
+  promtool check rules /etc/prometheus/rules.yml
+  grep -n -A6 'groups:' /etc/prometheus/rules.yml
+
+Правило записи обязано иметь record и expr, правило оповещения —
+alert и expr:
+  grep -n 'record:\|alert:\|expr:' /etc/prometheus/rules.yml
+
+ПРОБЛЕМА: error parsing rules file
+
+Файл правил не разобран: чаще всего в нём табуляция, лишний дефис
+или потерянное двоеточие. Файл правил — такой же YAML, как и основной
+конфигурационный, и ошибки в нём читаются теми же глазами.
+
+Порядок проверки: promtool check rules, затем табы, затем первый
+блок группы. Практика 8.
+
+  promtool check rules /etc/prometheus/rules.yml
+  grep -Pn "\t" /etc/prometheus/rules.yml
+  sed -n '1,25p' /etc/prometheus/rules.yml
+
+ПРОБЛЕМА: SUCCESS от promtool, но правила не работают
+
+Самая обидная ошибка практики: файл правил лежит на месте, promtool
+его проверяет, правила не вычисляются. Причина в том, что файл
+не подключён в rule_files, либо путь в rule_files относительный
+и разрешается не от того каталога.
+
+Порядок проверки: rule_files в конфигурации, затем список правил
+через API, затем лог загрузки. Практика 8.
+
+  grep -n -A3 'rule_files' /etc/prometheus/prometheus.yml
+  curl -s http://localhost:9090/api/v1/rules | python3 -m json.tool | head -30
+  journalctl -u prometheus -n 30 --no-pager | grep -i 'rule'
+
+ИСПРАВЛЕНО: в прежней версии курса правило InstanceDown лежало
+в /etc/prometheus/rules.yml, подключалось в rule_files как rules.yml
+без пути и не проверялось promtool. Файл лежал рядом с конфигурацией,
+поэтому ошибка не проявлялась до первой смены рабочего каталога.
+Сейчас в rule_files пишется полный путь:
+  rule_files:
+    - /etc/prometheus/rules.yml
+
+ПРОБЛЕМА: promtool test rules не находит файл тестов
+
+Файл тестов указывается путём, и путь этот относительный: promtool
+ищет его от текущего каталога, а не от каталога конфигурации.
+В курсе используется полный путь /etc/prometheus/tests/rules.test.yml.
+
+Порядок проверки: текущий каталог, наличие файла, путь в команде.
+Практики 8 и 16.
+
+  pwd ; ls -l /etc/prometheus/tests/
+  promtool test rules /etc/prometheus/tests/rules.test.yml
+
+ПРОБЛЕМА: FAILED: expected 1 alert, got 0
+
+Тест правил не прошёл: входные ряды в файле теста не совпадают
+с реальными метками, либо значение не переходит порог, либо мало
+времени относительно for. Тест — это утверждение о правиле, и
+расхождение почти всегда означает ошибку в тесте, а не в правиле.
+
+Порядок проверки: входные ряды, expr правила, значение for.
+Практика 8.
+
+  sed -n '1,40p' /etc/prometheus/tests/rules.test.yml
+  grep -n -A6 'alert: InstanceDown' /etc/prometheus/rules.yml
+  promtool test rules /etc/prometheus/tests/rules.test.yml
+
+
+=========================================================================
+4.2. ПРАВИЛО НЕ ПЕРЕХОДИТ В FIRING
+=========================================================================
+
+ПРОБЛЕМА: оповещение висит в Pending и в Firing не переходит
+
+Условие выполняется, но не держится достаточно долго. Значение for
+сравнивается с evaluation_interval: при for: 1m и интервале 15s нужно
+четыре вычисления подряд. Частая причина — часы на машине
+расходятся, и окно отсчитывается не так, как вы ожидаете.
+
+Порядок проверки: for, потом evaluation_interval, потом время
+на машине. Практики 8 и 9.
+
+  grep -n -A8 'alert: InstanceDown' /etc/prometheus/rules.yml
+  grep -n 'evaluation_interval\|scrape_interval' /etc/prometheus/prometheus.yml
+  chronyc tracking ; timedatectl
+
+Проверить, что выражение действительно истинно прямо сейчас:
+  curl -s --data-urlencode 'query=up == 0' http://localhost:9090/api/v1/query | python3 -m json.tool
+
+ПРОБЛЕМА: оповещение всегда в Firing, даже когда всё в порядке
+
+В expr написано выражение, которое истинно всегда: например,
+up вместо up == 0, или vector(1) без понимания, что это сторожевой
+пёс. Проверять нужно сам expr, а не получателя.
+
+Порядок проверки: expr правила, затем корень запроса в Graph.
+Практика 8.
+
+  curl -s --data-urlencode 'query=up' http://localhost:9090/api/v1/query | python3 -m json.tool | head -20
+  grep -n 'expr:' /etc/prometheus/rules.yml
+
+ПРОБЛЕМА: DiskWillFillIn4Hours не срабатывает на почти полном диске
+
+predict_linear экстраполирует по окну: если окно 6h, а диск заполнялся
+рывками, линия предсказания не пересекает ноль в пределах четырёх
+часов. Вторая причина — метка device или mountpoint в expr не совпала
+на стенде.
+
+Порядок проверки: значение выражения, потом окно и горизонт, потом
+метки. Практики 4 и 8.
+
+  curl -s --data-urlencode 'query=predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs"}[6h], 4*3600)' http://localhost:9090/api/v1/query | python3 -m json.tool
+  df -h
+  grep -n -A4 'DiskWillFillIn4Hours' /etc/prometheus/rules.yml
+
+
+#########################################################################
+ЧАСТЬ 5. ALERTMANAGER
+#########################################################################
+
+
+=========================================================================
+5.1. КОНФИГУРАЦИЯ И ЗАПУСК
+=========================================================================
+
+ПРОБЛЕМА: level=error msg="Loading configuration file failed" err="unknown fields"
+
+В конфигурации Alertmanager есть поле, которого он не знает: чаще
+всего это опечатка или поле из другой версии. Alertmanager 0.34.1
+отвергает такие поля целиком и не стартует — это защита от тихой
+работы не по замыслу.
+
+Порядок проверки: amtool check-config, затем поле из сообщения,
+затем версия. Практика 9.
+
+  amtool check-config /etc/alertmanager/alertmanager.yml
+  journalctl -u alertmanager -n 30 --no-pager
+  grep -n 'receivers\|routes\|group_by' /etc/alertmanager/alertmanager.yml
+
+Типичная опечатка — routes вместо route на верхнем уровне:
+  grep -n '^route:\|^routes:' /etc/alertmanager/alertmanager.yml
+
+ПРОБЛЕМА: invalid value for group_interval
+
+Длительность написана без единицы или с неверной единицей. В курсе
+все интервалы пишутся с единицей: 30s, 5m, 1h, 4h. Число без единицы
+Alertmanager читает как наносекунды.
+
+Порядок проверки: блок route целиком, потом amtool check-config.
+Практика 9.
+
+  grep -n 'group_wait\|group_interval\|repeat_interval' /etc/alertmanager/alertmanager.yml
+  amtool check-config /etc/alertmanager/alertmanager.yml
+
+Правильно:
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+ПРОБЛЕМА: bind: address already in use на 9093
+
+Порт занят второй копией Alertmanager или запущенной вручную копией
+бинарника. Частая причина на стенде — забытый остановленный
+эксперимент из предыдущего занятия.
+
+Порядок проверки: кто слушает порт, потом запущенные процессы.
+Практика 9.
+
+  sudo ss -lntp | grep 9093
+  ps aux | grep -v grep | grep alertmanager
+  sudo systemctl restart alertmanager
+
+
+=========================================================================
+5.2. ОПОВЕЩЕНИЯ НЕ ПРИХОДЯТ
+=========================================================================
+
+ПРОБЛЕМА: оповещение в состоянии Firing в Prometheus, но Alertmanager пуст
+
+Prometheus не знает, куда отправлять: в конфигурации нет секции
+alerting, адрес указан неверно или перезагрузка конфигурации не была
+сделана после правки. В логе Alertmanager при этом тишина —
+он просто ничего не получал.
+
+Порядок проверки: секция alerting, потом адрес в Runtime & Build
+Information, потом Alerts в Alertmanager. Практика 9.
+
+  grep -n -A6 'alerting' /etc/prometheus/prometheus.yml
+  curl -s http://localhost:9090/api/v1/alerts | python3 -m json.tool | head -20
+  curl -s http://localhost:9093/api/v2/alerts | python3 -m json.tool
+  journalctl -u alertmanager -n 30 --no-pager
+
+Проверить, что Prometheus реально шлёт:
+  curl -s http://localhost:9090/api/v1/status/runtimeinfo | python3 -m json.tool | head -20
+
+ПРОБЛЕМА: msg="Notify attempt failed" в логе Alertmanager
+
+Оповещение дошло до получателя и не было принято: неверный адрес
+webhook, закрытый порт, ошибка TLS или отказ SMTP-сервера. Сама
+причина напечатана в той же строке после err= или в поле error.
+
+Порядок проверки: получатель из лога, потом проверка адреса вручную,
+потом маршрут. Практика 9.
+
+  journalctl -u alertmanager -n 50 --no-pager | grep -i 'notify attempt failed'
+  curl -v -X POST http://10.0.2.5:8088/webhook -H 'Content-Type: application/json' -d '{}'
+  amtool config routes show --alertmanager.url=http://localhost:9093
+
+ПРОБЛЕМА: silence создан, а оповещения всё равно идут
+
+Метки в silence не совпали с метками оповещения. Метка alertname есть
+всегда, а вот instance в оповещении может отличаться от того, что
+вы написали: например, без порта или с другим адресом. Silence
+сравнивается по точному совпадению, если не задан regex.
+
+Порядок проверки: метки живого оповещения, потом метки silence.
+Практика 9.
+
+  amtool alert query --alertmanager.url=http://localhost:9093
+  amtool silence query --alertmanager.url=http://localhost:9093
+  curl -s http://localhost:9093/api/v2/silences | python3 -m json.tool | head -30
+
+ПРОБЛЕМА: сообщение не приходит и в логе ничего нет
+
+Оповещение подавлено inhibition или уже отправлено и ждёт
+repeat_interval. Второй случай выглядит как «Alertmanager сломался»,
+хотя он работает ровно так, как настроен: повтор через 4h — это
+не ошибка.
+
+Порядок проверки: группы в веб-интерфейсе :9093, потом inhibit_rules,
+потом repeat_interval. Практика 9.
+
+  curl -s http://localhost:9093/api/v2/status | python3 -m json.tool | head -20
+  grep -n -A8 'inhibit_rules' /etc/alertmanager/alertmanager.yml
+  grep -n 'repeat_interval' /etc/alertmanager/alertmanager.yml
+
+ПРОБЛЕМА: 200 оповещений за минуту превратились в поток сообщений
+
+group_wait и group_interval выставлены в 0s или в слишком маленькие
+значения: группировка не успевает склеить оповещения, и каждое уходит
+отдельным сообщением. Это не сбой, а следствие настроек.
+
+Порядок проверки: три интервала в route, потом repeat_interval
+для warning. Практика 9.
+
+  grep -n 'group_wait\|group_interval\|repeat_interval' /etc/alertmanager/alertmanager.yml
+  amtool config routes show --alertmanager.url=http://localhost:9093
+
+
+#########################################################################
+ЧАСТЬ 6. GRAFANA
+#########################################################################
+
+
+=========================================================================
+6.1. УСТАНОВКА И ВХОД
+=========================================================================
+
+ПРОБЛЕМА: Could not connect to packages.grafana.com:443
+
+Официальный apt-репозиторий Grafana недоступен из российской сети:
+соединение не устанавливается, и apt update заканчивается этой
+строкой. Инструкция «добавьте репозиторий Grafana и поставьте пакет»
+на такой сети не работает вообще.
+
+Порядок проверки: сначала убедиться, что хост действительно
+недоступен, потом перейти на зеркало Яндекса. Практика 5.
+
+  getent hosts packages.grafana.com
+  curl -I --max-time 5 https://packages.grafana.com/oss/deb
+  curl -I https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/dists/stable/Release
+
+Решение — зеркало Яндекса:
+  https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb
+
+ПРОБЛЕМА: unable to resolve host address 'dl.grafana.com'
+
+Имя не разрешается: DNS-ответ для этого хоста не приходит. Это другой
+симптом, чем отказ соединения, но причина та же — скачивание закрыто
+для российских адресов. wget и curl в этом случае даже не начинают
+загрузку.
+
+Порядок проверки: разрешение имени, затем доступность зеркала,
+затем установка пакетом из pool/. Практика 5.
+
+  getent hosts dl.grafana.com
+  nslookup dl.grafana.com
+  curl -s https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/dists/stable/Release | head -20
+
+Скачать пакет из каталога pool/ зеркала (ключ подписи не нужен):
+  wget https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/grafana_12.0.10_<сборка>_linux_amd64.deb
+
+ПРОБЛЕМА: dpkg: dependency problems prevent configuration of grafana
+
+Пакет поставлен через dpkg -i, а зависимости не доставлены. dpkg
+не умеет разрешать зависимости, он только распаковывает. Пакет
+числится установленным и при этом нерабочим.
+
+Порядок проверки: состояние пакета, потом доустановка зависимостей.
+Практика 5.
+
+  dpkg -l | grep grafana
+  sudo apt --fix-broken install
+  sudo apt install ./grafana_12.0.10_<сборка>_linux_amd64.deb
+
+ПОЧЕМУ ИМЕННО ТАК: в курсе Grafana ставится через apt install ./*.deb,
+а не через dpkg -i, именно из-за зависимостей: apt сам доставит
+библиотеки, а dpkg оставит их вам.
+
+ПРОБЛЕМА: listen tcp :3000: bind: address already in use
+
+Grafana не стартует, в логе видно level=error msg="Failed to start
+server". Порт 3000 занят: на mon уже запущена Grafana из Compose-стека
+практики 7, где она специально опубликована на 3001, либо осталась
+копия от предыдущего запуска. Смотреть нужно и службы, и контейнеры.
+
+Порядок проверки: кто слушает 3000, потом контейнеры, потом
+конфигурация Grafana. Практики 5 и 7.
+
+  sudo ss -lntp | grep 3000
+  docker ps --format '{{.Names}}\t{{.Ports}}'
+  grep -n '^http_port' /etc/grafana/grafana.ini
+
+ПРОБЛЕМА: 401 Unauthorized при входе в Grafana
+
+Введены не те учётные данные или пароль admin уже сменён другим
+студентом на этом стенде. Grafana в курсе ставится с admin/admin
+и требует смены пароля при первом входе.
+
+Порядок проверки: логин, потом сброс пароля, потом провижининг.
+Практика 5.
+
+  journalctl -u grafana-server -n 30 --no-pager | grep -i 'auth\|login'
+  sudo grafana cli admin reset-admin-password Console47
+  sudo systemctl restart grafana-server
+
+
+=========================================================================
+6.2. ПАНЕЛИ И ИСТОЧНИКИ ДАННЫХ
+=========================================================================
+
+ПРОБЛЕМА: Data source is working, но панели пустые
+
+Источник данных подключён, запросы к нему проходят, а на панелях
+«No data». Почти всегда дело в диапазоне времени дашборда: Prometheus
+собирает данные с момента установки, а дашборд смотрит на последние
+сутки — и по умолчанию выбрано что-то не то.
+
+Порядок проверки: диапазон времени, потом тот же запрос в Prometheus,
+потом интервал панели. Практика 5.
+
+  curl -s --data-urlencode 'query=up' http://10.0.2.5:9090/api/v1/query | python3 -m json.tool | head -20
+  date -u
+
+Проверить, что данные вообще есть за последний час:
+  curl -s --data-urlencode 'query=up' --data-urlencode 'start=1h' http://10.0.2.5:9090/api/v1/query_range | head -c 400
+
+ПРОБЛЕМА: HTTP Error Bad Gateway при Save & test
+
+Grafana не дотянулась до Prometheus: адрес источника данных указан
+с localhost, а сама Grafana живёт на другой машине или в контейнере.
+В контейнере localhost — это сам контейнер, а не хост.
+
+Порядок проверки: URL источника, потом связь с mon из контейнера,
+потом порт 9090. Практики 5 и 7.
+
+  curl -s -o /dev/null -w '%{http_code}\n' http://10.0.2.5:9090/-/healthy
+  docker exec -it grafana curl -s http://10.0.2.5:9090/-/healthy
+
+Правильный URL источника данных:
+  http://10.0.2.5:9090
+
+ПРОБЛЕМА: datasource not found после импорта дашборда
+
+В JSON дашборда прописан идентификатор источника данных с машины
+автора, а на стенде он другой. Grafana не подставляет источник
+по имени автоматически, и панели остаются пустыми без ошибки на
+уровне дашборда.
+
+Порядок проверки: идентификатор источника в Grafana, потом переменная
+datasource в JSON. Практика 5.
+
+  grep -n 'datasource' /var/lib/grafana/dashboards/node-exporter-full.json | head -10
+  curl -s http://admin:Console47@localhost:3000/api/datasources | python3 -m json.tool
+
+ПРОБЛЕМА: No data в дашборде 11467 (Docker), хотя cAdvisor работает
+
+Дашборд написан под другую версию cAdvisor: имена метрик и набор
+меток между версиями меняются. Метрики есть, но запросы панели ищут
+не то имя или не ту метку.
+
+Порядок проверки: список метрик в Prometheus, потом запрос конкретной
+панели. Практика 7.
+
+  curl -s http://10.0.2.13:8080/metrics | grep '^container_memory_working_set_bytes' | head -3
+  curl -s --data-urlencode 'query=container_memory_working_set_bytes' http://localhost:9090/api/v1/query | head -c 400
+  curl -s http://10.0.2.13:8080/metrics | grep -c '^container_'
+
+ПРОБЛЕМА: дашборды не провижинятся, в логе нет строки finished to provision dashboards
+
+Путь к каталогу дашбордов в /etc/grafana/provisioning/dashboards/lab.yml
+не совпадает с реальным, или файл дашборда нечитаем для учётной
+записи grafana. Grafana в таком случае пишет предупреждение и просто
+не подхватывает файл.
+
+Порядок проверки: путь в провайдере, права на каталог, потом лог.
+Практика 5.
+
+  grep -n 'path' /etc/grafana/provisioning/dashboards/lab.yml
+  ls -l /var/lib/grafana/dashboards/
+  journalctl -u grafana-server -n 50 --no-pager | grep -i 'provision'
+  sudo chown -R grafana:grafana /var/lib/grafana/dashboards
+
+
+#########################################################################
+ЧАСТЬ 7. ЭКСПОРТЁРЫ
+#########################################################################
+
+
+=========================================================================
+7.1. NODE_EXPORTER И СИСТЕМНЫЕ ЭКСПОРТЁРЫ
+=========================================================================
+
+ПРОБЛЕМА: curl: (7) Failed to connect to 127.0.0.1 port 9100
+
+Экспортёр не запущен или не слушает. Юнит-файл может быть установлен,
+но не включён: systemctl enable --now забыли выполнить, и после
+перезагрузки машины экспортёр не поднялся.
+
+Порядок проверки: состояние службы, потом порт, потом лог. Практика 2.
+
+  systemctl status node_exporter
+  sudo ss -lntp | grep 9100
+  journalctl -u node_exporter -n 30 --no-pager
+
+ПРОБЛЕМА: node_exporter падает с Permission denied на каталог textfile
+
+Каталог для textfile collector указан в аргументах запуска, но создан
+под root, а служба работает от node_exporter. Каталог должен быть
+читаем для службы, иначе коллектор молча не отдаёт метрики.
+
+Порядок проверки: права на каталог, потом аргумент --collector.
+textfile.directory, потом содержимое каталога. Практика 12.
+
+  ls -ld /var/lib/node_exporter/textfile
+  sudo chown -R node_exporter:node_exporter /var/lib/node_exporter
+  systemctl show -p ExecStart node_exporter
+  curl -s localhost:9100/metrics | grep lab_job_last_success
+
+Помните про расширение файла: коллектор читает только *.prom:
+  ls -l /var/lib/node_exporter/textfile/*.prom
+
+ПРОБЛЕМА: nginx: [emerg] unknown directive "stub_status"
+
+Директива stub_status есть только в модуле ngx_http_stub_status_module,
+и проверка конфигурации падает, если модуль не собран в этом пакете
+nginx. Либо директива поставлена не в тот блок: она допустима только
+внутри server или location.
+
+Порядок проверки: сборка nginx с модулем, потом уровень блока.
+Практика 6.
+
+  nginx -V 2>&1 | tr ' ' '\n' | grep stub_status
+  sudo nginx -t
+  cat /etc/nginx/conf.d/stats.conf
+
+ПРАВИЛЬНЫЙ блок выглядит так:
+  server {
+      listen 8081;
+      location /server-status {
+          stub_status;
+          access_log off;
+          allow 127.0.0.1;
+          deny all;
+      }
+  }
+
+ПРОБЛЕМА: curl: (7) Failed to connect to 127.0.0.1 port 9113
+
+nginx-prometheus-exporter не запущен или упал при старте, потому что
+не смог прочитать stub_status. Экспортёр без источника данных
+не работает и в лог пишет причину.
+
+Порядок проверки: служба, потом её аргумент -nginx.scrape-uri, потом
+сам stub_status. Практика 6.
+
+  systemctl status nginx-prometheus-exporter
+  systemctl show -p ExecStart nginx-prometheus-exporter
+  curl -s http://127.0.0.1:8081/server-status
+  journalctl -u nginx-prometheus-exporter -n 30 --no-pager
+
+ПРОБЛЕМА: nginx_up равно 0
+
+Экспортёр запущен, но не может прочитать stub_status: директива
+не добавлена, порт другой, или nginx отклоняет запрос по allow/deny.
+Полезная метрика, потому что она отделяет «экспортёр жив» от
+«источник данных доступен».
+
+Порядок проверки: stub_status руками, потом аргумент экспортёра,
+потом адрес в allow. Практика 6.
+
+  curl -v http://127.0.0.1:8081/server-status
+  curl -s localhost:9113/metrics | grep '^nginx_up'
+  journalctl -u nginx -n 20 --no-pager | grep -i 'stub_status\|forbidden'
+
+ПРОБЛЕМА: Error opening connection to database, pg_up 0
+
+postgres_exporter не подключился к базе: неверный DATA_SOURCE_NAME,
+пароль, имя базы или хост. Отдельный случай — экспортёр запущен
+от учётной записи engineer, а не от postgres, и не имеет прав.
+
+Порядок проверки: метрика pg_up, переменная окружения службы, затем
+подключение psql вручную. Практика 6.
+
+  curl -s localhost:9187/metrics | grep '^pg_up'
+  systemctl show -p Environment postgres_exporter
+  psql 'postgresql://postgres:Console47@localhost:5432/postgres' -c 'select 1'
+  journalctl -u postgres_exporter -n 30 --no-pager
+
+ПОЧЕМУ ИМЕННО ТАК: pg_up и up — разные метрики. up говорит, что
+Prometheus собрал метрики с экспортёра. pg_up говорит, что сам
+экспортёр дотянулся до базы. Первое может быть 1 при втором равном 0.
+
+ПРОБЛЕМА: permission denied for relation pg_stat_activity
+
+Учётная запись базы, под которой ходит экспортёр, не имеет прав
+на представления статистики. Метрики при этом отдаются, но набор
+pg_* приходит пустым, и это выглядит как «экспортёр не работает».
+
+Порядок проверки: права роли, потом список метрик, потом лог
+экспортёра. Практика 6.
+
+  psql 'postgresql://postgres:Console47@localhost:5432/postgres' -c '\du'
+  curl -s localhost:9187/metrics | grep -c '^pg_'
+  journalctl -u postgres_exporter -n 30 --no-pager | grep -i 'permission'
+
+ПРОБЛЕМА: windows_exporter установлен, но цель DOWN
+
+Windows Defender Firewall не пропускает порт 9182: установка .msi
+открывает правило не всегда. Это первое, что проверяют на win1,
+и только потом смотрят службу.
+
+Порядок проверки: проверка порта с mon, потом правило брандмауэра,
+потом служба. Практика 6.
+
+  curl -m 5 -v http://10.0.2.21:9182/metrics
+  ssh engineer@10.0.2.5 'nc -z -w3 10.0.2.21 9182'
+
+На win1 в PowerShell от администратора:
+  Get-NetFirewallRule -DisplayName '*windows_exporter*'
+  New-NetFirewallRule -DisplayName 'windows_exporter' -Direction Inbound -LocalPort 9182 -Protocol TCP -Action Allow
+
+
+=========================================================================
+7.2. КОНТЕЙНЕРЫ И CADVISOR
+=========================================================================
+
+ПРОБЛЕМА: permission denied while trying to connect to the Docker daemon socket
+
+Учётная запись engineer не входит в группу docker, а сокет доступен
+только ей. Изменение группы действует в новых сессиях, поэтому
+после usermod нужен повторный вход.
+
+Порядок проверки: группы текущей сессии, потом вход заново.
+Практика 7.
+
+  id engineer
+  sudo usermod -aG docker engineer
+  newgrp docker
+  docker ps
+
+ЧЕГО НЕ ДЕЛАТЬ: лечить это через sudo docker. Так вы получите
+работающий пример и не поймёте, почему у коллеги он не работает.
+
+ПРОБЛЕМА: контейнер cAdvisor перезапускается, в docker ps состояние Restarting
+
+cAdvisor не смонтирован /sys/fs/cgroup или /sys, и при старте
+не находит данные о контрольных группах. Контейнер поднимается,
+падает и поднимается снова — в логе видно причину.
+
+Порядок проверки: логи контейнера, потом список монтирований,
+потом запуск с полным набором томов. Практика 7.
+
+  docker logs --tail 40 cadvisor
+  docker inspect cadvisor --format '{{json .HostConfig.Binds}}'
+  docker restart cadvisor
+
+Правильный запуск включает четыре тома только для чтения:
+  --volume /:/rootfs:ro --volume /var/run:/var/run:ro
+  --volume /sys:/sys:ro --volume /var/lib/docker/:/var/lib/docker:ro
+
+ПРОБЛЕМА: метрики container_* есть, но без метки name
+
+cAdvisor не смог получить имена контейнеров: сокет Docker не смонтирован
+или смонтирован не туда. Метрики остаются, но в них только идентификатор,
+и дашборд по именам показывает пустоту.
+
+Порядок проверки: монтирование сокета, потом список меток в ответе,
+потом имена контейнеров. Практика 7.
+
+  docker inspect cadvisor --format '{{json .HostConfig.Binds}}'
+  curl -s http://10.0.2.13:8080/metrics | grep '^container_memory_working_set_bytes' | head -3
+  docker ps --format '{{.ID}} {{.Names}}'
+
+ПРОБЛЕМА: port is already allocated при запуске Compose-стека
+
+Порт уже занят другим контейнером или службой. В курсе это разобрано
+на примере Grafana: на mon порт 3000 занят службой, поэтому в
+Compose-файле она публикуется на 3001. Тот же конфликт возможен
+с 9090 и 9100.
+
+Порядок проверки: занятые порты, потом контейнеры, потом правка
+порта в Compose. Практика 7.
+
+  sudo ss -lntp | grep -E ':(3000|9090|9100)'
+  docker ps --format '{{.Names}}\t{{.Ports}}'
+  docker compose down
+  docker compose up -d
+
+ПРОБЛЕМА: lstat /var/lib/docker: no such file or directory
+
+Каталог не существует или путь указан неверно: на стенде Docker
+хранит данные в /var/lib/docker, и если его нет, значит используется
+другой корень (data-root) или это вообще не та машина.
+
+Порядок проверки: каталог, потом настройки демона, потом запуск
+контейнера. Практика 7.
+
+  ls -ld /var/lib/docker
+  sudo docker info | grep -i 'docker root dir'
+  cat /etc/docker/daemon.json
+
+
+#########################################################################
+ЧАСТЬ 8. ХРАНЕНИЕ, ПРОИЗВОДИТЕЛЬНОСТЬ, КАРДИНАЛЬНОСТЬ
+#########################################################################
+
+
+=========================================================================
+8.1. ДИСК И СРОК ХРАНЕНИЯ
+=========================================================================
+
+ПРОБЛЕМА: err="ran out of space"
+
+Диск под TSDB закончился. Prometheus переходит в режим только для
+чтения: данные пишутся уже не полностью, сбор продолжается, но
+новые блоки не создаются. Ошибка появляется в логе, а на графиках
+это выглядит как пропуски.
+
+Порядок проверки: место на диске, размер TSDB, срок хранения.
+Практики 14 и 15.
+
+  df -h /var/lib/prometheus
+  du -sh /var/lib/prometheus
+  grep -n -A3 'retention' /etc/prometheus/prometheus.yml
+  journalctl -u prometheus -n 50 --no-pager | grep -i 'space\|read-only'
+
+Срок хранения ищем в prometheus.yml, а не в юнит-файле: в 3.15.0
+флаги --storage.tsdb.retention.* устарели, и значение живёт
+в секции storage конфигурации.
+
+ЧЕГО НЕ ДЕЛАТЬ: ставить срок хранения на годы вперёд «на всякий
+случай». Место кончится не в конце года, а в тот день, когда это
+будет мешать разбору инцидента.
+
+ПРОБЛЕМА: too many outstanding requests
+
+Запросы дороже, чем сервер может обслужить одновременно: чаще всего
+это дашборд с большим диапазоном и мелким шагом или запрос на
+30 дней без агрегации. Prometheus честно отказывает, а не копит
+запросы в очередь.
+
+Порядок проверки: диапазон и шаг запроса, потом число серий,
+потом настройки лимитов. Практика 14.
+
+  curl -s http://localhost:9090/api/v1/status/tsdb | python3 -m json.tool | head -20
+  curl -s --data-urlencode 'query=prometheus_engine_queries' http://localhost:9090/api/v1/query
+  grep -n 'query.max-concurrency\|query.timeout' /etc/systemd/system/prometheus.service
+
+ПРОБЛЕМА: prometheus_tsdb_head_series растёт без остановки
+
+В базу попадает метка с высокой кардинальностью: идентификатор
+пользователя, номер запроса, путь URL, идентификатор контейнера
+в имени метрики. Каждое новое значение метки — новый ряд, и память
+растёт линейно.
+
+Порядок проверки: сначала общее число серий, потом виновник через
+topk по числу серий. Практики 13 и 14.
+
+  curl -s --data-urlencode 'query=prometheus_tsdb_head_series' http://localhost:9090/api/v1/query
+  curl -s --data-urlencode 'query=topk(10, count by (__name__) ({__name__=~".+"}))' http://localhost:9090/api/v1/query | python3 -m json.tool
+  curl -s --data-urlencode 'query=count(count by (__name__) ({__name__=~".+"}))' http://localhost:9090/api/v1/query
+
+Как убрать источник: правило записи с агрегацией или
+metric_relabel_configs, выбрасывающие лишние серии до записи.
+
+ПРОБЛЕМА: сбор цели стал дольше scrape_timeout
+
+Экспортёр отдаёт слишком много метрик или тормозит: время сбора
+приблизилось к таймауту, и цель начинает мигать между UP и DOWN.
+Это не сетевой сбой, хотя выглядит как он.
+
+Порядок проверки: scrape_duration_seconds по цели, число образцов,
+потом лимиты задания. Практика 14.
+
+  curl -s --data-urlencode 'query=scrape_duration_seconds' http://localhost:9090/api/v1/query | python3 -m json.tool
+  curl -s --data-urlencode 'query=topk(5, scrape_samples_scraped)' http://localhost:9090/api/v1/query | python3 -m json.tool
+  grep -n 'scrape_timeout\|sample_limit' /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: очередь remote_write растёт и не разгружается
+
+Удалённое хранилище недоступно или не успевает принимать: очередь
+копится, а Prometheus продолжает писать локально. Проблема не в
+локальной базе, и разбирать её нужно на стороне получателя.
+
+Порядок проверки: метрики очереди, доступность получателя, настройки
+queue_config. Практика 14.
+
+  curl -s --data-urlencode 'query=prometheus_remote_storage_queue_highest_sent_timestamp_seconds' http://localhost:9090/api/v1/query | python3 -m json.tool
+  curl -s --data-urlencode 'query=rate(prometheus_remote_storage_failed_samples_total[5m])' http://localhost:9090/api/v1/query
+  journalctl -u prometheus -n 50 --no-pager | grep -i 'remote'
+
+
+=========================================================================
+8.2. СВОЙ ЭКСПОРТЁР
+=========================================================================
+
+ПРОБЛЕМА: promtool check metrics: invalid metric name
+
+Имя метрики не соответствует формату: заглавные буквы, дефисы,
+точки, кириллица или имя начинается с цифры. promtool проверяет
+имена и единицы измерения, и это ровно тот случай, когда проверка
+ловит ошибку до попадания в базу.
+
+Порядок проверки: имя в коде, потом вывод /metrics через promtool.
+Практика 13.
+
+  curl -s localhost:9200/metrics | promtool check metrics
+  grep -n 'Counter\|Gauge\|Histogram' /opt/lab_exporter/app.py
+
+Правило именования курса: <префикс>_<что>_<единица>_<суффикс>,
+например lab_queue_depth и lab_job_duration_seconds.
+
+ПРОБЛЕМА: Duplicate timeseries: lab_queue_depth
+
+Метрика зарегистрирована дважды: объект создаётся при каждом запросе
+или модуль импортируется повторно. prometheus_client не разрешает
+зарегистрировать одну метрику дважды и падает при старте.
+
+Порядок проверки: где создаётся объект метрики, потом повторный
+импорт модуля. Практика 13.
+
+  grep -n 'Gauge(\|Counter(\|Histogram(' /opt/lab_exporter/app.py
+  journalctl -u lab_exporter -n 30 --no-pager
+
+Правильно — один объект на уровне модуля:
+  lab_queue_depth = Gauge('lab_queue_depth', 'Глубина очереди')
+
+ПРОБЛЕМА: OSError: [Errno 98] Address already in use на порту 9200
+
+Порт занят прежним запуском экспортёра: процесс остался от ручного
+запуска в терминале, и systemd не может занять порт.
+
+Порядок проверки: кто слушает порт, потом процессы, потом перезапуск.
+Практика 13.
+
+  sudo ss -lntp | grep 9200
+  ps aux | grep -v grep | grep lab_exporter
+  sudo systemctl restart lab_exporter
+
+ПРОБЛЕМА: histogram_quantile по своим метрикам даёт NaN
+
+В гистограмме нет метки le или агрегация срезала её. Второй случай —
+сравниваются бакеты разных метрик, что для гистограмм запрещено:
+складывать можно только одноимённые бакеты.
+
+Порядок проверки: есть ли le, правильная ли агрегация. Практика 13.
+
+  curl -s localhost:9200/metrics | grep lab_job_duration_seconds_bucket | head -5
+  curl -s --data-urlencode 'query=sum by (le) (rate(lab_job_duration_seconds_bucket[5m]))' http://localhost:9090/api/v1/query | python3 -m json.tool
+
+ПРОБЛЕМА: метрика из Pushgateway не появилась в Prometheus
+
+Группа отправлена с меткой job, которой нет в задании pushgateway,
+или задание отсутствует в конфигурации. При honor_labels: true метка
+из URL побеждает, и искать ряд нужно именно по ней.
+
+Порядок проверки: что лежит в Pushgateway, потом задание, потом
+запрос по метке. Практика 12.
+
+  curl -s http://10.0.2.5:9091/metrics | grep lab_batch_jobs_total
+  curl -s --data-urlencode 'query=lab_batch_jobs_total' http://localhost:9090/api/v1/query | python3 -m json.tool
+  grep -n -A8 'job_name: pushgateway' /etc/prometheus/prometheus.yml
+
+ПРОБЛЕМА: textfile-метрика не видна в node_exporter
+
+Три причины по частоте: не задан --collector.textfile.directory,
+у файла не расширение .prom, или права на каталог не позволяют
+службе его прочитать. Коллектор при этом не пишет ошибку в основную
+строку лога.
+
+Порядок проверки: аргументы запуска, содержимое каталога, права.
+Практика 12.
+
+  systemctl show -p ExecStart node_exporter
+  ls -l /var/lib/node_exporter/textfile/
+  sudo chown -R node_exporter:node_exporter /var/lib/node_exporter
+  curl -s localhost:9100/metrics | grep lab_job_last_success
+
+Помните про атомарную запись: сначала .prom.tmp, потом mv.
+
+ПРОБЛЕМА: probe_success 0 при живом сайте
+
+Модуль blackbox выбран не тот: для HTTPS нужен http_2xx, а не
+tcp_connect, и наоборот. Вторая причина — цель проверяется из
+российской сети, а сайт отдаёт отказ именно ей.
+
+Порядок проверки: проба руками с тем же модулем, потом код ответа,
+потом конфигурация задания. Практика 12.
+
+  curl -s 'http://localhost:9115/probe?target=https://prometheus.io&module=http_2xx' | grep -E '^(probe_success|probe_http_status_code)'
+  curl -s 'http://localhost:9115/probe?target=https://prometheus.io&module=http_2xx' | grep probe_duration_seconds
+  journalctl -u blackbox -n 30 --no-pager
+
+ПРОБЛЕМА: level=error msg="Error resolving target"
+
+blackbox_exporter не смог разрешить имя проверяемой цели: опечатка
+в адресе, недоступный DNS или проверка имени, которого нет. Это
+ошибка проб, а не сбора: метрики цели при этом собираются нормально.
+
+Порядок проверки: адрес из задания, разрешение имени с mon, потом
+модуль. Практика 12.
+
+  grep -n -A10 'job_name: blackbox_http' /etc/prometheus/prometheus.yml
+  getent hosts prometheus.io
+  journalctl -u blackbox -n 30 --no-pager | grep -i 'resolv'
+
+
+#########################################################################
+ЧАСТЬ 9. УСТАНОВКА В РОССИИ
+#########################################################################
+
+
+=========================================================================
+9.1. ПОЧЕМУ ОФИЦИАЛЬНЫЕ ХОСТЫ НЕ РАБОТАЮТ
+=========================================================================
+
+Grafana Labs закрыла скачивание для российских адресов. Недоступны
+три хоста, и каждый отказывает по-своему:
+
+  grafana.com          страница загрузки не открывается;
+  dl.grafana.com       имя не разрешается или загрузка не начинается;
+  packages.grafana.com apt update не может подключиться к репозиторию.
+
+Это не ошибка стенда и не ошибка студента. Привычная инструкция
+«добавьте репозиторий Grafana» на такой сети заканчивается на
+apt update, и разбирать её нужно как сетевую проблему, а не как
+ошибку конфигурации.
+
+ЗЕРКАЛО ЯНДЕКСА. Готовый apt-репозиторий Grafana Labs лежит
+на зеркале:
+  https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb
+
+Это тот же самый репозиторий, а не чужая сборка: в нём те же
+подписанные пакеты в каталоге pool/, тот же индекс dists/stable,
+и dists/stable/Release подписан ключом Grafana Labs. Меняется
+только адрес, с которого файлы забирают. Проверить это можно
+самому, не устанавливая ничего.
+
+  curl -s https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/dists/stable/Release | head -20
+  curl -sI https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/ | head -5
+
+
+=========================================================================
+9.2. ЧТО ДЕЛАТЬ
+=========================================================================
+
+ПРОБЛЕМА: apt update падает с Could not connect to packages.grafana.com:443
+
+Репозиторий Grafana прописан в /etc/apt/sources.list.d/grafana.list
+и указывает на закрытый хост. apt update перестаёт работать целиком,
+и это блокирует не только Grafana, но и все остальные пакеты.
+
+Порядок проверки: список репозиториев, потом доступность хостов,
+потом замена. Практика 5 и приложение 3.
+
+  grep -rn 'grafana' /etc/apt/sources.list.d/ 2>/dev/null
+  getent hosts packages.grafana.com
+  curl -I --max-time 5 https://packages.grafana.com/oss/deb
+
+Заменить источник на зеркало Яндекса:
+  echo 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb stable main' | sudo tee /etc/apt/sources.list.d/grafana.list
+  sudo apt update
+
+ПРОБЛЕМА: wget: unable to resolve host address 'dl.grafana.com'
+
+Загрузка .deb с официального хоста невозможна: имя не разрешается.
+Ключ подписи лежит на том же заблокированном хосте, поэтому способ
+«скачать ключ и поставить репозиторий» тоже не проходит.
+
+Порядок проверки: разрешение имени, потом скачивание пакета прямо
+из pool/ зеркала, потом установка. Практика 5.
+
+  getent hosts dl.grafana.com
+  wget https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/grafana_12.0.10_<сборка>_linux_amd64.deb
+  sudo apt install ./grafana_12.0.10_<сборка>_linux_amd64.deb
+  grafana-server -v
+
+ПОЧЕМУ ИМЕННО ТАК: способ «пакетом из pool/» в курсе основной
+именно потому, что ключ подписи репозитория при нём не нужен вообще.
+Он работает даже там, где закрыт и apt.grafana.com вместе с ключом.
+
+ПРОБЛЕМА: ключ Grafana Labs недоступен, apt ругается на подпись
+
+Публичного ключа нет: gpg.key лежит на закрытом хосте, на зеркале
+его нет. Два выхода: принести файл ключа заранее и положить
+в /etc/apt/keyrings/grafana.gpg, либо поставить репозиторий
+с [trusted=yes] — и понимать, что при этом подпись не проверяется.
+
+Порядок проверки: наличие ключа, потом его отпечаток, потом
+источник. Практика 5 и приложение 3.
+
+  ls -l /etc/apt/keyrings/grafana.gpg
+  gpg --show-keys /etc/apt/keyrings/grafana.gpg
+  sudo apt update
+
+ЧЕГО НЕ ДЕЛАТЬ: ставить [trusted=yes] на боевой машине. Это
+отключает проверку подписи пакетов, и вы теряете единственную
+защиту от подмены пакета в сети. В учебном стенде это допустимо
+только потому, что стенд изолирован.
+
+ПРОБЛЕМА: apt не находит пакет grafana после смены репозитория
+
+Список источников заменён, но индекс не обновлён, либо имя пакета
+в команде install написано с версией и не совпало с реальным именем
+файла на зеркале.
+
+Порядок проверки: apt update, потом поиск пакета, потом точное имя
+файла на зеркале. Практика 5.
+
+  sudo apt update
+  apt-cache policy grafana
+  apt-cache madison grafana
+  curl -s https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/ | grep -o 'grafana_12\.0\.10[^"]*' | head -5
+
+
+#########################################################################
+ЧАСТЬ 10. КАК ЧИТАТЬ ОШИБКУ
+#########################################################################
+
+
+=========================================================================
+10.1. ПОРЯДОК ДЕЙСТВИЙ ПРИ ЛЮБОЙ НЕПОНЯТНОЙ ОШИБКЕ
+=========================================================================
+
+Этот порядок выручает чаще, чем знание конкретного текста сообщения.
+Действия идут строго по номерам: каждый следующий шаг имеет смысл
+только после предыдущего. Если пропустить первый шаг и сразу полезть
+в конфигурацию, можно потерять час на ошибке, которой там нет.
+
+1. ПРОВЕРИТЬ ВРЕМЯ. Расхождение часов ломает правило for: 5m так,
+   что оно то срабатывает, то нет, а на графиках появляются провалы.
+   Это первая проверка, потому что она самая быстрая и самая частая.
+
+     chronyc tracking
+     timedatectl
+     date -u
+     ssh engineer@10.0.2.11 date -u
+
+2. ПРОВЕРИТЬ КОНФИГУРАЦИЮ. promtool и amtool ловят механические
+   ошибки, которые человек пропускает. Проверять нужно до перезапуска
+   службы, а не после.
+
+     promtool check config /etc/prometheus/prometheus.yml
+     promtool check rules /etc/prometheus/rules.yml
+     amtool check-config /etc/alertmanager/alertmanager.yml
+
+3. ПОСМОТРЕТЬ TARGETS. Страница Status → Targets отвечает на вопрос
+   «собираются ли метрики» быстрее любого лога. Колонка Error
+   называет причину словами connection refused или context deadline
+   exceeded, и это разные диагнозы.
+
+     curl -s http://localhost:9090/api/v1/targets | python3 -m json.tool | head -40
+     curl -s 'http://localhost:9090/api/v1/targets?state=dropped' | python3 -m json.tool
+
+4. ПОСМОТРЕТЬ ЛОГИ. journalctl -u показывает, что служба сказала
+   при старте и что сказала при отказе. Читать нужно строку целиком:
+   причина идёт после err= или level=error.
+
+     journalctl -u prometheus -n 50 --no-pager
+     journalctl -u alertmanager -n 50 --no-pager
+     journalctl -u grafana-server -n 50 --no-pager
+     journalctl -u node_exporter -n 30 --no-pager
+
+5. ПРОВЕРИТЬ ПРАВА НА КАТАЛОГ ДАННЫХ. Девять отказов служб
+   из десяти — это права на каталог данных, а не ошибка
+   в конфигурации. Конфигурация при этом проверку проходит.
+
+     ls -ld /var/lib/prometheus /etc/prometheus
+     sudo chown -R prometheus:prometheus /var/lib/prometheus
+     systemctl show -p User -p ExecStart prometheus
+
+6. ПРОВЕРИТЬ ВЕРСИЮ И ПУТЬ. Половина «непонятных» ошибок — это
+   старый бинарник в PATH или второй экземпляр службы. Спросить
+   у системы, что именно запущено, быстрее, чем вспоминать.
+
+     promtool --version
+     amtool --version
+     which -a prometheus promtool
+     ps aux | grep -v grep | grep -E 'prometheus|alertmanager'
+
+
+=========================================================================
+10.2. ЧТО ПРОВЕРЯТЬ, КОГДА ОШИБКИ НЕТ
+=========================================================================
+
+Худший случай — не ошибка, а тишина: служба работает, сообщений нет,
+данных нет. Здесь порядок такой:
+
+1. up по всем целям — есть ли вообще связь.
+
+     curl -s --data-urlencode 'query=up == 0' http://localhost:9090/api/v1/query | python3 -m json.tool
+
+2. Перезагрузка конфигурации прошла — применились ли правки.
+
+     curl -s --data-urlencode 'query=prometheus_config_last_reload_successful' http://localhost:9090/api/v1/query
+
+3. Ряд существует — не пустой ли результат из-за диапазона или окна.
+
+     curl -s --data-urlencode 'query=count(node_load1)' http://localhost:9090/api/v1/query
+
+4. Правило подключено — видно ли его в списке правил.
+
+     curl -s http://localhost:9090/api/v1/rules | python3 -m json.tool | head -30
+
+5. Оповещение дошло до Alertmanager — появилось ли оно там.
+
+     curl -s http://localhost:9093/api/v2/alerts | python3 -m json.tool
+
+6. Получатель ответил — что сказал лог Alertmanager.
+
+     journalctl -u alertmanager -n 50 --no-pager | grep -i 'notify'
+
+Если все шесть шагов дают ожидаемый ответ, а результата нет, значит
+дело в последнем звене: маршрут, silence, inhibition или настройки
+группировки. Это разбирается в практике 9, и там же сказано главное:
+Alertmanager не гарантирует доставку, он гарантирует повтор.
+
+
+=========================================================================
+10.3. КОРОТКИЙ ЧЕК-ЛИСТ ДЕЖУРНОГО
+=========================================================================
+
+  * время на машинах согласовано — chronyc tracking, timedatectl;
+  * promtool check config и check rules говорят SUCCESS;
+  * amtool check-config говорит SUCCESS;
+  * в Targets нет целей в состоянии DOWN, кроме ожидаемых;
+  * prometheus_config_last_reload_successful равно 1;
+  * в логах journalctl -u нет строк с level=error и err=;
+  * каталоги данных принадлежат учётным записям служб;
+  * в Alertmanager нет застрявших silence, о которых все забыли;
+  * версия бинарников совпадает с реестром сущностей курса;
+  * тег latest не использован нигде.

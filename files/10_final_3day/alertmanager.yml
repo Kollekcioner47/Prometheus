@@ -1,0 +1,102 @@
+# Итоговая маршрутизация трека «3 дня».
+# Дерево то же, что в практике 9, но здесь поле continue наконец
+# работает по делу: учебные email и Telegram — заглушки, поэтому
+# копия каждого уведомления идёт в учебный webhook, и мы видим,
+# что именно ушло дежурному. С настоящими получателями копию
+# убирают. Все значения получателей — ЗАГЛУШКИ.
+
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: 'smtp.example.lab:587'
+  smtp_from: 'alertmanager@example.lab'
+  smtp_auth_username: 'alertmanager@example.lab'
+  smtp_auth_password: 'ЗАГЛУШКА_ПАРОЛЬ_SMTP'
+  smtp_require_tls: true
+  telegram_api_url: 'https://api.telegram.org'
+  telegram_bot_token: 'ЗАГЛУШКА_ТОКЕН_БОТА'
+
+templates:
+  - '/etc/alertmanager/templates/*.tmpl'
+
+route:
+  receiver: 'webhook-uchebnyy'
+  group_by: ['alertname', 'env']
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # 1. Критичное: дежурному в Telegram, continue: true разрешает
+    #    проверить следующие маршруты и отправить копию.
+    - matchers:
+        - severity="critical"
+      receiver: 'telegram-duty'
+      group_wait: 10s
+      group_interval: 1m
+      repeat_interval: 1h
+      continue: true
+      routes:
+        - matchers:
+            - alertname="Watchdog"
+          receiver: 'webhook-uchebnyy'
+          continue: false
+
+    # 2. Предупреждения: команде письмом, тоже с копией.
+    - matchers:
+        - severity="warning"
+      receiver: 'email-team'
+      group_wait: 1m
+      group_interval: 10m
+      repeat_interval: 12h
+      continue: true
+
+    # 3. Копия всего, что прошло выше, плюс пристанище для info, none
+    #    и оповещений без метки severity.
+    - matchers:
+        - alertname=~".+"
+      receiver: 'webhook-uchebnyy'
+      continue: false
+
+inhibit_rules:
+  # 1. Машина недоступна — про её диск и память не сообщаем.
+  #    Работает потому, что правила HostOutOfMemory, HostDiskSpaceLow
+  #    и DiskWillFillIn4Hours сохраняют метку instance.
+  - name: 'instance-down-mutes-its-own-alerts'
+    source_matchers:
+      - alertname="InstanceDown"
+    target_matchers:
+      - alertname=~"HostOutOfMemory|HostDiskSpaceLow|DiskWillFillIn4Hours"
+    equal: ['instance']
+
+  # 2. Про один и тот же раздел сообщаем один раз: прогноз
+  #    заполнения гасит сообщение о низком пороге свободного места.
+  #    Без mountpoint в equal раздел /var погасил бы сообщение о /.
+  - name: 'disk-forecast-mutes-disk-threshold'
+    source_matchers:
+      - alertname="DiskWillFillIn4Hours"
+    target_matchers:
+      - alertname="HostDiskSpaceLow"
+    equal: ['instance', 'mountpoint']
+
+receivers:
+  - name: 'webhook-uchebnyy'
+    webhook_configs:
+      - url: 'http://10.0.2.5:9095/alerts'
+        send_resolved: true
+        max_alerts: 20
+
+  - name: 'email-team'
+    email_configs:
+      - to: 'team@example.lab'
+        smarthost: 'smtp.example.lab:587'
+        require_tls: true
+        send_resolved: true
+        headers:
+          Subject: '{{ template "email.subject" . }}'
+
+  - name: 'telegram-duty'
+    telegram_configs:
+      - chat_id: -1001234567890
+        parse_mode: 'HTML'
+        send_resolved: true
+        message: '{{ template "telegram.message" . }}'

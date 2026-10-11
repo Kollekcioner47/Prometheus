@@ -1,0 +1,141 @@
+# Правила оповещения итоговой работы. Практика 16.
+#
+# У каждого правила три части, без которых оно не работает:
+#   expr   — условие; должно быть ложным, когда всё в порядке;
+#   for    — сколько условие должно держаться, прежде чем звонить;
+#   labels — по ним Alertmanager решает, кому и когда сообщить.
+#
+# Значение severity из labels — единственное, на что опирается
+# маршрутизация в alertmanager.yml: critical, warning, info.
+# Ничего другого в дереве маршрутов нет, и это сделано намеренно:
+# маршрут по свободному тексту рано или поздно перестаёт совпадать.
+
+groups:
+  - name: lab.alerting
+    interval: 15s
+    rules:
+      # Машина недоступна. up равно 0 означает «собрать метрики
+      # не удалось», а не «машина выключена»: причин может быть
+      # три, и они разбираются в практике 2.
+      - alert: InstanceDown
+        expr: up{env="lab"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Цель {{ $labels.instance }} недоступна"
+          description: >-
+            Задание {{ $labels.job }} не отвечает больше двух минут.
+            Проверьте доступность цели и службу экспортёра.
+
+      # Мало свободной памяти. Порог в долях, а не в байтах.
+      - alert: HostOutOfMemory
+        expr: instance:node_memory_available:ratio < 0.10
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Мало памяти на {{ $labels.instance }}"
+          description: >-
+            Свободно {{ $value | humanizePercentage }} памяти
+            от общей. Разбираться нужно до того, как придёт OOM.
+
+      # Диск закончится в ближайшие четыре часа. Линейное
+      # предсказание по последнему часу: на ровном графике
+      # predict_linear может дать отрицательное значение, и это
+      # нормально — условия всё равно ложное.
+      - alert: DiskWillFillIn4Hours
+        expr: |
+          predict_linear(
+            node_filesystem_avail_bytes{fstype!~"tmpfs|overlay|squashfs"}[1h],
+            4 * 3600
+          ) < 0
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Диск {{ $labels.device }} на {{ $labels.instance }} кончается"
+          description: >-
+            По скорости за последний час места хватит меньше чем
+            на четыре часа.
+
+      # Диск уже заполнен. Это critical: писать в него больше
+      # нельзя, и часть служб уже не работает.
+      - alert: HostOutOfDiskSpace
+        expr: instance:node_filesystem_used:ratio > 0.90
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Диск {{ $labels.device }} на {{ $labels.instance }} заполнен"
+          description: >-
+            Занято {{ $value | humanizePercentage }} раздела.
+
+      # Сертификат истекает. Сравнение с time() вместо predict_linear:
+      # дата истечения — это факт, а не тренд.
+      - alert: SSLCertificateExpiringSoon
+        expr: |
+          (probe_ssl_earliest_cert_expiry - time()) / 86400 < 14
+        for: 1h
+        labels:
+          severity: warning
+        annotations:
+          summary: "Сертификат {{ $labels.instance }} истекает"
+          description: >-
+            Осталось {{ $value | humanize }} дней.
+
+      # Проверка извне не проходит. Отдельное правило, потому что
+      # это утверждение о доступности сервиса, а не о машине.
+      - alert: BlackboxProbeFailed
+        expr: probe_success == 0
+        for: 3m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Проверка {{ $labels.instance }} не проходит"
+          description: >-
+            Модуль {{ $labels.module }} вернул отказ.
+
+      # Сторожевой пёс: горит постоянно. Молчание этого оповещения —
+      # сигнал, что сломана цепочка «Prometheus — Alertmanager —
+      # получатель». severity: info, потому что в дашборд он попадает,
+      # а дежурного будить не должен.
+      #
+      # Поля for у этого правила нет намеренно: сторожить нужно
+      # с первой секунды, а задержка здесь означала бы, что минуту
+      # после отказа канала оповещений тишина считается нормой.
+      - alert: LabWatchdog
+        expr: vector(1)
+        labels:
+          severity: info
+        annotations:
+          summary: "Цепочка оповещений жива"
+          description: >-
+            Это оповещение горит всегда. Если оно пропало,
+            сломан канал доставки.
+
+      # Свой экспортёр не отдаёт метрики. Здесь видно, зачем нужен
+      # свой экспортёр в строю: правило на его метриках ловит отказ
+      # раньше, чем о нём сообщит владелец очереди.
+      - alert: LabExporterQueueStuck
+        expr: |
+          job:lab_queue_depth:avg5m > 100
+          and
+          rate(lab_batch_jobs_total[10m]) == 0
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Очередь своего экспортёра не разбирается"
+          description: >-
+            Глубина очереди {{ $value }}, при этом заданий
+            не выполняется.
+
+  # Правило записи, которое нужно только для одного оповещения
+  # выше: скорость выполнения заданий. Живёт в отдельной группе,
+  # потому что вычисляется по другой метрике.
+  - name: lab.recording.jobs
+    interval: 15s
+    rules:
+      - record: job:lab_batch_jobs:rate5m
+        expr: sum by (job) (rate(lab_batch_jobs_total[5m]))

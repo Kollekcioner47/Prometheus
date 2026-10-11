@@ -1,0 +1,96 @@
+# files/07_containers/docker-compose.yml
+#
+# Стек мониторинга целиком в контейнерах, для машины app1.
+#
+# Запуск:    docker compose up -d
+# Остановка: docker compose down
+#
+# ВАЖНО: Grafana публикуется на 3001, а не на 3000. Порт 3000
+# на стенде занят службой Grafana на машине mon.
+#
+# Тег latest не используется ни у одного образа: у каждого
+# указана конкретная версия. Причина разобрана в практике 7.
+
+services:
+
+  # Хранилище метрик. Том prometheus_data переживает
+  # пересоздание контейнера: без него история метрик
+  # пропадёт при первом же docker compose down.
+  prometheus:
+    image: prom/prometheus:v3.15.0
+    container_name: lab-prometheus
+    restart: unless-stopped
+    volumes:
+      - ./prometheus.fragment.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --web.enable-lifecycle
+    # Срок хранения здесь НЕ передаётся флагом: в 3.15.0 флаг
+    # --storage.tsdb.retention.time помечен устаревшим, и значение
+    # задано в самом prometheus.fragment.yml, в секции storage.
+    ports:
+      - "9090:9090"
+
+  # Grafana OSS 12.0.10. Том grafana_data хранит
+  # пользователей, дашборды и источники данных: провижининг
+  # здесь не настроен намеренно, чтобы было видно,
+  # что именно теряется без тома.
+  grafana:
+    image: grafana/grafana-oss:12.0.10
+    container_name: lab-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    volumes:
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3001:3000"
+
+  # node_exporter собирает метрики самой машины app1 —
+  # те же, что отдаёт служба node_exporter из практики 2.
+  # Порт 9100 на app1 уже занят этой службой: перед
+  # запуском стека она останавливается.
+  node_exporter:
+    image: prom/node-exporter:v1.12.1
+    container_name: lab-node-exporter
+    restart: unless-stopped
+    command:
+      - --path.procfs=/host/proc
+      - --path.sysfs=/host/sys
+      - --path.rootfs=/rootfs
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    ports:
+      - "9100:9100"
+
+  # cAdvisor читает статистику контейнеров из ядра хоста.
+  # Ему нужны /sys и /var/lib/docker только для чтения,
+  # а через /var/run/docker.sock он получает список
+  # контейнеров. Режим ro у сокета запрещает менять сам
+  # файл, но не запрещает разговаривать через него:
+  # сокет двусторонний. Подробный разбор флагов —
+  # в run_cadvisor.txt того же каталога.
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.55.1
+    container_name: lab-cadvisor
+    restart: unless-stopped
+    privileged: true
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    devices:
+      - /dev/kmsg
+    ports:
+      - "8080:8080"
+
+volumes:
+  prometheus_data:
+  grafana_data:

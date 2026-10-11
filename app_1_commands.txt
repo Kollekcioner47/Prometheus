@@ -1,0 +1,1201 @@
+ПРИЛОЖЕНИЕ 1. ШПАРГАЛКА: КОМАНДЫ КУРСА
+
+ЭТО ШПАРГАЛКА, А НЕ УЧЕБНИК. Здесь собраны команды курса «Мониторинг
+на Prometheus и Grafana» в том виде, в котором они выполняются
+на стенде: адреса, порты, каталоги, версии и имена заданий взяты
+из единого реестра сущностей и совпадают с практиками до символа.
+Открывайте приложение, когда нужно вспомнить синтаксис, а не когда
+нужно понять, почему это работает: объяснения — в практиках.
+
+ПОМЕТКА ОБ УЧЁТНЫХ ДАННЫХ. Стенд изолирован, поэтому учебный пароль
+Console47 напечатан прямо здесь. В рабочей среде так нельзя: пароли
+и токены хранят в секретах, а не в конфигурации и не в этом файле.
+
+ЧТО ЗДЕСЬ ЕСТЬ. Команды разделены на части: стенд и доступ, установка
+компонентов, проверка конфигураций, работа с API, запросы к
+экспортёрам, Alertmanager, справочные таблицы, метрики, сводка PromQL
+и разбор частых опечаток. Таблицы продублированы текстом там, где
+широкая строка мешает чтению в терминале.
+
+
+#########################################################################
+ЧАСТЬ 1. СТЕНД И ДОСТУП
+#########################################################################
+
+
+=========================================================================
+1.1. МАШИНЫ СТЕНДА
+=========================================================================
+
+Пять виртуальных машин. Первые четыре обязательны, пятая нужна только
+для практики 6.
+
+  mon   10.0.2.5   Prometheus, Alertmanager, Grafana, Pushgateway,
+                   blackbox_exporter, node_exporter
+  web1  10.0.2.11  nginx, nginx-prometheus-exporter, node_exporter
+  db1   10.0.2.12  PostgreSQL, postgres_exporter, node_exporter
+  app1  10.0.2.13  Docker, cAdvisor, node_exporter
+  win1  10.0.2.21  Windows Server 2022, windows_exporter
+
+Проверка связи с машинами стенда:
+
+  ping -c2 10.0.2.5
+  ping -c2 10.0.2.11
+  ping -c2 10.0.2.12
+  ping -c2 10.0.2.13
+
+Имена машин разрешаются через /etc/hosts, DNS-зоны на стенде нет:
+
+  cat /etc/hosts
+  getent hosts mon web1 db1
+
+
+=========================================================================
+1.2. ВХОД ПО SSH
+=========================================================================
+
+Учётная запись на всех Linux-машинах — engineer, пароль Console47,
+sudo без пароля. На win1 учётная запись Administrator.
+
+  ssh engineer@10.0.2.5
+  ssh engineer@10.0.2.11
+  ssh engineer@10.0.2.12
+  ssh engineer@10.0.2.13
+
+Проверка sudo без пароля одной строкой:
+
+  ssh engineer@10.0.2.11 'sudo -n true && echo ok'
+
+Разложить ключ по машинам стенда (если вход по ключу настроен):
+
+  for h in 10.0.2.5 10.0.2.11 10.0.2.12 10.0.2.13; do
+    ssh-copy-id engineer@$h
+  done
+
+
+=========================================================================
+1.3. ВРЕМЯ НА МАШИНАХ
+=========================================================================
+
+Время — часть мониторинга, а не деталь: расхождение часов ломает
+правило for: 5m так, что оно то срабатывает, то нет.
+
+  chronyc tracking
+  chronyc sources -v
+  timedatectl
+  timedatectl status | grep -E 'Time zone|synchronized'
+  date -u
+
+Проверить, что машины согласованы между собой:
+
+  ssh engineer@10.0.2.11 date -u
+  ssh engineer@10.0.2.12 date -u
+
+Проверить, что служба времени работает:
+
+  systemctl status chrony
+  sudo systemctl restart chrony
+
+
+=========================================================================
+1.4. ЧЕГО НЕ ДЕЛАТЬ
+=========================================================================
+
+ЧЕГО НЕ ДЕЛАТЬ: ставить Prometheus командой apt install prometheus.
+В репозитории Ubuntu версия отстаёт на годы, а конфигурация ложится
+в неожиданное место. Курс ставит Prometheus из архива GitHub.
+
+ЧЕГО НЕ ДЕЛАТЬ: запускать Prometheus и экспортёры от root. Для каждой
+службы в курсе создаётся своя системная учётная запись без домашнего
+каталога и без оболочки.
+
+ЧЕГО НЕ ДЕЛАТЬ: использовать тег latest. Ни в образах контейнеров,
+ни в командах скачивания: latest не отвечает на вопрос «что у меня
+стоит» — а это первый вопрос при разборе поломки.
+
+
+#########################################################################
+ЧАСТЬ 2. УСТАНОВКА КОМПОНЕНТОВ
+#########################################################################
+
+
+=========================================================================
+2.1. ОБЩИЙ ПОРЯДОК УСТАНОВКИ ИЗ АРХИВА
+=========================================================================
+
+Порядок один для Prometheus, Alertmanager, node_exporter, Pushgateway
+и blackbox_exporter: скачать архив в /home/engineer/distr, распаковать,
+положить двоичные файлы в /usr/local/bin, конфигурацию — в /etc/<служба>,
+данные — в /var/lib/<служба>, создать учётную запись, написать
+юнит-файл systemd, выполнить daemon-reload и enable --now.
+
+  mkdir -p /home/engineer/distr
+  cd /home/engineer/distr
+  wget https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.linux-amd64.tar.gz
+  tar -xzf prometheus-3.15.0.linux-amd64.tar.gz
+  ls -l prometheus-3.15.0.linux-amd64
+
+Что внутри архива Prometheus 3.15.0:
+
+  prometheus                             сам сервер
+  promtool                               проверка конфигураций и правил
+  documentation/examples/prometheus.yml  пример конфигурации
+  LICENSE, NOTICE
+
+  Каталогов consoles/ и console_libraries/ в архиве НЕТ: их убрали
+  из дистрибутива в Prometheus 3.0. Проверить состав можно командой
+  tar -tzf prometheus-3.15.0.linux-amd64.tar.gz
+
+Копирование в /usr/local/bin и раскладка каталогов:
+
+  sudo install -m 0755 prometheus-3.15.0.linux-amd64/prometheus /usr/local/bin/
+  sudo install -m 0755 prometheus-3.15.0.linux-amd64/promtool /usr/local/bin/
+  sudo mkdir -p /etc/prometheus /var/lib/prometheus
+  sudo chown -R prometheus:prometheus /etc/prometheus /var/lib/prometheus
+
+  Конфигурацию пишут руками; из архива в /etc/prometheus ничего
+  не копируется.
+
+
+=========================================================================
+2.2. СИСТЕМНЫЕ УЧЁТНЫЕ ЗАПИСИ
+=========================================================================
+
+Prometheus и Alertmanager работают от одной учётной записи prometheus,
+каждый экспортёр — от своей. Домашнего каталога и оболочки нет:
+это служба, а не человек.
+
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin prometheus
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin node_exporter
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin postgres_exporter
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin nginx_exporter
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin blackbox
+  sudo useradd --system --no-create-home --shell /usr/sbin/nologin pushgateway
+
+Проверка и права на каталоги:
+
+  id prometheus
+  getent passwd node_exporter
+  sudo chown -R prometheus:prometheus /var/lib/prometheus
+  sudo chown -R prometheus:prometheus /etc/prometheus
+  sudo chown -R prometheus:prometheus /var/lib/alertmanager
+  sudo chown -R prometheus:prometheus /etc/alertmanager
+
+
+=========================================================================
+2.3. ЮНИТ-ФАЙЛ PROMETHEUS
+=========================================================================
+
+  sudo tee /etc/systemd/system/prometheus.service >/dev/null <<'EOF'
+  [Unit]
+  Description=Prometheus
+  Wants=network-online.target
+  After=network-online.target
+
+  [Service]
+  User=prometheus
+  Group=prometheus
+  Type=simple
+  ExecStart=/usr/local/bin/prometheus \
+    --config.file=/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/var/lib/prometheus \
+    --web.listen-address=0.0.0.0:9090 \
+    --web.enable-lifecycle
+  # Срока хранения в аргументах нет: в 3.15.0 флаги
+  # --storage.tsdb.retention.time и .size устарели, значение задаётся
+  # в prometheus.yml:
+  #   storage:
+  #     tsdb:
+  #       retention:
+  #         time: 15d
+  Restart=on-failure
+  RestartSec=5
+
+  [Install]
+  WantedBy=multi-user.target
+  EOF
+
+ЗАЧЕМ ФЛАГ --web.enable-lifecycle: он разрешает перезагрузку
+конфигурации по HTTP без перезапуска службы. Без него запрос
+POST /-/reload вернёт 403, а выставленный наружу флаг — это
+возможность перезагрузить конфигурацию кому угодно.
+
+Юнит-файлы остальных компонентов отличаются только ExecStart
+и учётной записью:
+
+  node_exporter    --web.listen-address=:9100
+  alertmanager     --config.file=/etc/alertmanager/alertmanager.yml
+                   --storage.path=/var/lib/alertmanager
+  pushgateway      --web.listen-address=:9091
+  blackbox         --config.file=/etc/blackbox_exporter/blackbox.yml
+
+
+=========================================================================
+2.4. ВКЛЮЧЕНИЕ И ПРОВЕРКА СЛУЖБ
+=========================================================================
+
+После правки любого юнит-файла — daemon-reload. Без него systemd
+не увидит изменений и запустит старую версию.
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now prometheus
+  sudo systemctl enable --now node_exporter
+  sudo systemctl enable --now alertmanager
+  sudo systemctl enable --now pushgateway
+
+  systemctl status prometheus
+  systemctl is-active prometheus
+  systemctl is-enabled prometheus
+
+  systemctl restart prometheus
+  systemctl stop node_exporter
+  systemctl start node_exporter
+
+Смотреть логи службы:
+
+  journalctl -u prometheus -n 50 --no-pager
+  journalctl -u prometheus -f
+  journalctl -u prometheus --since '10 min ago'
+  journalctl -u node_exporter -b
+
+Проверить, что служба слушает свой порт:
+
+  ss -lntp | grep -E '9090|9093|9100|9091|9115'
+  sudo lsof -i :9090
+
+
+=========================================================================
+2.5. УСТАНОВКА GRAFANA ИЗ ЗЕРКАЛА ЯНДЕКСА
+=========================================================================
+
+Grafana Labs закрыла скачивание для российских адресов, поэтому
+Grafana в курсе ставится из зеркала Яндекса. Это тот же самый
+apt-репозиторий Grafana Labs, меняется только адрес.
+
+  https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb
+
+Способ 1, основной — пакетом из каталога pool/, ключ подписи
+репозитория не нужен:
+
+  wget https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/grafana_12.0.10_<сборка>_linux_amd64.deb
+  sudo apt install ./grafana_12.0.10_<сборка>_linux_amd64.deb
+  grafana-server -v
+  systemctl status grafana-server
+
+Способ 2 — репозиторием зеркала, как это делают в рабочей среде:
+
+  echo 'deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb stable main' | sudo tee /etc/apt/sources.list.d/grafana.list
+  sudo apt update
+  sudo apt install grafana
+
+Проверить подлинность зеркала до установки:
+
+  curl -s https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/dists/stable/Release | head -20
+
+Проверить, что официальные хосты действительно недоступны:
+
+  curl -I https://dl.grafana.com
+  getent hosts packages.grafana.com
+
+
+=========================================================================
+2.6. DOCKER И CADVISOR
+=========================================================================
+
+  sudo apt install -y docker.io
+  sudo usermod -aG docker engineer
+  newgrp docker
+  docker run --rm hello-world
+  docker ps
+  docker stats --no-stream
+
+  docker run --detach \
+    --name cadvisor \
+    --volume /:/rootfs:ro \
+    --volume /var/run:/var/run:ro \
+    --volume /sys:/sys:ro \
+    --volume /var/lib/docker/:/var/lib/docker:ro \
+    --publish 8080:8080 \
+    gcr.io/cadvisor/cadvisor:v0.53.0
+
+Метки образа берутся с версией, тег latest не используется нигде.
+Проверка, что cAdvisor отдаёт метрики:
+
+  curl -s localhost:8080/metrics | head
+  curl -s localhost:8080/metrics | grep -c '^container_'
+
+
+#########################################################################
+ЧАСТЬ 3. ПРОВЕРКА КОНФИГУРАЦИЙ
+#########################################################################
+
+
+=========================================================================
+3.1. PROMTOOL
+=========================================================================
+
+promtool входит в архив Prometheus 3.15.0 и лежит рядом с бинарником.
+Проверять конфигурацию нужно до перезагрузки, а не после.
+
+  promtool --version
+
+  promtool check config /etc/prometheus/prometheus.yml
+  promtool check config --syntax-only /etc/prometheus/prometheus.yml
+  promtool check rules /etc/prometheus/rules.yml
+  promtool check rules /etc/prometheus/rules/*.yml
+  promtool test rules /etc/prometheus/tests/rules.test.yml
+
+Ожидаемый вывод check config:
+
+  SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file syntax
+
+Ожидаемый вывод check rules:
+
+  SUCCESS: 3 rules found
+
+Проверка формата exposition, который отдаёт свой экспортёр:
+
+  curl -s localhost:9200/metrics | promtool check metrics
+  cat sample.prom | promtool check metrics
+
+ЧТО PROMTOOL НЕ ПРОВЕРЯЕТ: доступность целей, правильность адресов
+и то, что правило действительно срабатывает. Конфигурация может быть
+синтаксически верной и при этом бесполезной — поэтому после promtool
+смотрят страницу Targets.
+
+
+=========================================================================
+3.2. AMTOOL
+=========================================================================
+
+amtool входит в архив Alertmanager 0.34.1.
+
+  amtool --version
+  amtool check-config /etc/alertmanager/alertmanager.yml
+  amtool config routes show --alertmanager.url=http://localhost:9093
+  amtool config show --alertmanager.url=http://localhost:9093
+
+Проверка конфигурации до перезапуска службы — правило курса: сначала
+amtool check-config, только потом systemctl restart alertmanager.
+
+Проверить, что nginx и остальные конфигурации целы:
+
+  sudo nginx -t
+  sudo nginx -T | grep -A5 stub_status
+
+
+=========================================================================
+3.3. ЮНИТ-ТЕСТЫ ПРАВИЛ
+=========================================================================
+
+Файл тестов описывает входные ряды и ожидаемые оповещения. Формат
+берётся из files/08_rules/tests/rules.test.yml.
+
+  promtool test rules /etc/prometheus/tests/rules.test.yml
+  promtool test rules /etc/prometheus/tests/*.test.yml
+
+Ожидаемый вывод при успехе:
+
+  SUCCESS
+
+Ожидаемый вывод при расхождении:
+
+  FAILED:
+    expr: up == 0
+    expected: 1 alert, got 0
+
+Тесты правил нужны потому, что правило ломается молча: promtool check
+rules скажет SUCCESS, а оповещение не придёт никогда.
+
+
+#########################################################################
+ЧАСТЬ 4. РАБОТА С API PROMETHEUS
+#########################################################################
+
+
+=========================================================================
+4.1. ПЕРЕЗАГРУЗКА КОНФИГУРАЦИИ
+=========================================================================
+
+Перезагрузка без перезапуска службы: данные в TSDB сохраняются,
+соединения не рвутся. Работает только при --web.enable-lifecycle.
+
+  curl -X POST http://localhost:9090/-/reload
+  curl -X POST http://10.0.2.5:9090/-/reload
+
+Проверить, что перезагрузка прошла:
+
+  curl -s http://localhost:9090/api/v1/query?query=prometheus_config_last_reload_successful
+
+Ожидаемый ответ:
+
+  {"status":"success","data":{"resultType":"vector","result":[{"metric":{},"value":[1700000000,"1"]}]}}
+
+ЧЕГО НЕ ДЕЛАТЬ: включать --web.enable-lifecycle и смотреть на 9090
+из сети без аутентификации. Перезагрузку монтируют за обратный прокси
+вместе с basic auth.
+
+
+=========================================================================
+4.2. ПРОСТЫЕ ЗАПРОСЫ
+=========================================================================
+
+  curl -s 'http://localhost:9090/api/v1/query?query=up'
+  curl -s 'http://localhost:9090/api/v1/query?query=up{env="lab"}'
+  curl -s 'http://localhost:9090/api/v1/query?query=node_load1'
+  curl -s --data-urlencode 'query=rate(node_cpu_seconds_total{mode="idle"}[5m])' \
+    http://localhost:9090/api/v1/query
+
+ЧЕГО НЕ ДЕЛАТЬ: передавать запрос с фигурными скобками и кавычками
+без --data-urlencode. Оболочка съест скобки, и вы будете разбирать
+ошибку своего запроса вместо ошибки Prometheus.
+
+Диапазонный запрос: обязательны start, end и step.
+
+  curl -s --data-urlencode 'query=node_load1' \
+    --data-urlencode 'start=2026-01-01T00:00:00Z' \
+    --data-urlencode 'end=2026-01-01T01:00:00Z' \
+    --data-urlencode 'step=15s' http://localhost:9090/api/v1/query_range
+
+Шаг 15s совпадает с интервалом сбора: мельче брать смысла нет.
+
+
+=========================================================================
+4.3. СЛУЖЕБНЫЕ КОНЕЧНЫЕ ТОЧКИ
+=========================================================================
+
+  curl -s http://localhost:9090/api/v1/targets
+  curl -s http://localhost:9090/api/v1/rules
+  curl -s http://localhost:9090/api/v1/alerts
+  curl -s http://localhost:9090/api/v1/labels
+  curl -s http://localhost:9090/api/v1/label/__name__/values
+  curl -s http://localhost:9090/api/v1/metadata
+  curl -s http://localhost:9090/api/v1/status/config
+  curl -s http://localhost:9090/api/v1/status/tsdb
+  curl -s http://localhost:9090/api/v1/status/runtimeinfo
+  curl -s http://localhost:9090/-/healthy
+  curl -s http://localhost:9090/-/ready
+
+Полезные фильтры по странице целей:
+
+  curl -s http://localhost:9090/api/v1/targets | grep -o '"health":"[a-z]*"' | sort | uniq -c
+  curl -s http://localhost:9090/api/v1/targets?state=active | python3 -m json.tool | head -40
+
+Федерация и метрики самого сервера:
+
+  curl -s 'http://localhost:9090/federate?match[]=up'
+  curl -s http://localhost:9090/metrics | grep '^prometheus_tsdb_head_series'
+
+
+=========================================================================
+4.4. ПРОВЕРКА ПРАВИЛ ЧЕРЕЗ API
+=========================================================================
+
+  curl -s http://localhost:9090/api/v1/rules | python3 -m json.tool | head -40
+  curl -s http://localhost:9090/api/v1/alerts | python3 -m json.tool
+  curl -s 'http://localhost:9090/api/v1/rules?type=alert'
+  curl -s 'http://localhost:9090/api/v1/rules?type=record'
+
+Ожидаемое состояние правила в выводе: inactive, pending, firing.
+Пустой список alerts при hotящем правиле означает, что правило
+не подключено в rule_files или перезагрузка конфигурации не сделана.
+
+
+#########################################################################
+ЧАСТЬ 5. ЗАПРОСЫ К ЭКСПОРТЁРАМ
+#########################################################################
+
+
+=========================================================================
+5.1. NODE_EXPORTER, ПОРТ 9100
+=========================================================================
+
+  curl -s http://localhost:9100/metrics | head
+  curl -s http://10.0.2.5:9100/metrics | grep '^node_load1'
+  curl -s http://10.0.2.11:9100/metrics | grep '^node_memory_MemAvailable_bytes'
+  curl -s http://10.0.2.12:9100/metrics | grep '^node_filesystem_avail_bytes'
+  curl -s http://10.0.2.13:9100/metrics | grep '^node_boot_time_seconds'
+  curl -s http://localhost:9100/metrics | grep -c '^node_'
+  curl -s http://localhost:9100/metrics | grep '^node_exporter_build_info'
+
+Посмотреть только имена метрик без HELP и TYPE:
+
+  curl -s http://localhost:9100/metrics | grep -v '^#' | cut -d'{' -f1 | cut -d' ' -f1 | sort -u | head -30
+
+
+=========================================================================
+5.2. NGINX-EXPORTER, ПОРТ 9113
+=========================================================================
+
+  curl -s http://10.0.2.11:9113/metrics | grep nginx_connections
+  curl -s http://10.0.2.11:9113/metrics | grep '^nginx_up'
+  curl -s http://10.0.2.11:9113/metrics | grep nginx_http_requests_total
+
+Отдельно — сам stub_status nginx на порту 8081, к которому ходит
+экспортёр:
+
+  curl -s http://127.0.0.1:8081/server-status
+
+Ожидаемый ответ stub_status:
+
+  Active connections: 1
+  server accepts handled requests
+   12 12 34
+  Reading: 0 Writing: 1 Waiting: 0
+
+
+=========================================================================
+5.3. POSTGRES_EXPORTER, ПОРТ 9187
+=========================================================================
+
+  curl -s http://10.0.2.12:9187/metrics | grep '^pg_up'
+  curl -s http://10.0.2.12:9187/metrics | grep '^pg_stat_database_numbackends'
+  curl -s http://10.0.2.12:9187/metrics | grep '^pg_settings_max_connections'
+  curl -s http://10.0.2.12:9187/metrics | grep '^pg_stat_activity_count'
+
+pg_up равен 1, когда экспортёр смог подключиться к базе. Это метрика
+экспортёра, а не Prometheus: up говорит о связи, pg_up — о базе.
+
+
+=========================================================================
+5.4. CADVISOR, ПОРТ 8080
+=========================================================================
+
+  curl -s http://10.0.2.13:8080/metrics | head
+  curl -s http://10.0.2.13:8080/metrics | grep '^container_cpu_usage_seconds_total'
+  curl -s http://10.0.2.13:8080/metrics | grep '^container_memory_working_set_bytes'
+  curl -s http://10.0.2.13:8080/metrics | grep '^container_fs_usage_bytes'
+  curl -s http://10.0.2.13:8080/healthz
+
+Oжидаемый ответ /healthz — строка OK. Если cAdvisor перезапускается,
+первым делом проверяют, смонтирован ли /sys/fs/cgroup.
+
+
+=========================================================================
+5.5. BLACKBOX_EXPORTER, ПОРТ 9115
+=========================================================================
+
+Проверка выполняется не запросом метрик, а запросом пробы: адрес цели
+и модуль передаются параметрами.
+
+  curl 'http://localhost:9115/probe?target=https://prometheus.io&module=http_2xx'
+  curl 'http://localhost:9115/probe?target=http://10.0.2.11&module=http_2xx'
+  curl 'http://localhost:9115/probe?target=10.0.2.11:80&module=tcp_connect'
+  curl 'http://localhost:9115/probe?target=10.0.2.5&module=icmp'
+  curl -s 'http://localhost:9115/probe?target=https://prometheus.io&module=http_2xx' | grep '^probe_success'
+  curl -s 'http://localhost:9115/probe?target=https://prometheus.io&module=http_2xx' | grep 'probe_duration_seconds'
+  curl -s localhost:9115/metrics | grep '^blackbox_exporter_build_info'
+
+
+=========================================================================
+5.6. PUSHGATEWAY, ПОРТ 9091
+=========================================================================
+
+Отправка метрик задания backup. Метки job и instance задаются в URL,
+а не в теле запроса.
+
+  echo 'lab_batch_jobs_total 3' | curl --data-binary @- http://10.0.2.5:9091/metrics/job/backup/instance/db1
+  echo 'lab_job_last_success_timestamp_seconds 1700000000' | curl --data-binary @- http://10.0.2.5:9091/metrics/job/backup/instance/db1
+
+  curl -s http://10.0.2.5:9091/metrics | grep lab_batch_jobs_total
+  curl -s http://10.0.2.5:9091/metrics | grep push_time_seconds
+  curl -s http://10.0.2.5:9091/metrics | grep push_failure_time_seconds
+
+Удалить группу целиком (нужен --web.enable-admin-api):
+
+  curl -X DELETE http://10.0.2.5:9091/api/v1/admin/wipe
+  curl -X DELETE http://10.0.2.5:9091/metrics/job/backup/instance/db1
+
+ЧЕГО НЕ ДЕЛАТЬ: хранить в Pushgateway счётчики. Непрерывности между
+запусками задания нет, и rate() по такой метрике посчитает мусор.
+Pushgateway не удаляет метрики сам: через месяц он покажет данные
+давно умершего задания.
+
+
+=========================================================================
+5.7. СВОЙ ЭКСПОРТЁР, ПОРТ 9200
+=========================================================================
+
+Свой экспортёр lab_exporter из практики 13 живёт в /opt/lab_exporter
+и отдаёт метрики на порту 9200.
+
+  ls -l /opt/lab_exporter
+  curl -s http://localhost:9200/metrics
+  curl -s http://localhost:9200/metrics | grep '^lab_queue_depth'
+  curl -s http://localhost:9200/metrics | grep '^lab_job_duration_seconds'
+  curl -s http://localhost:9200/metrics | promtool check metrics
+  journalctl -u lab_exporter -n 30 --no-pager
+
+
+#########################################################################
+ЧАСТЬ 6. ALERTMANAGER
+#########################################################################
+
+
+=========================================================================
+6.1. ПРОВЕРКА КОНФИГУРАЦИИ И МАРШРУТОВ
+=========================================================================
+
+  amtool check-config /etc/alertmanager/alertmanager.yml
+  amtool config routes show --alertmanager.url=http://localhost:9093
+  amtool config show --alertmanager.url=http://localhost:9093
+
+Ожидаемый вывод check-config:
+
+  Checking '/etc/alertmanager/alertmanager.yml'  SUCCESS
+  Found:
+    - global config
+    - 1 route
+    - 2 receivers
+
+Посмотреть дерево маршрутов до перезапуска — самый быстрый способ
+понять, почему оповещение ушло не тому получателю:
+
+  amtool config routes test --config.file=/etc/alertmanager/alertmanager.yml severity=critical
+  amtool config routes test --config.file=/etc/alertmanager/alertmanager.yml env=lab alertname=InstanceDown
+
+
+=========================================================================
+6.2. ОПОВЕЩЕНИЯ ВРУЧНУЮ
+=========================================================================
+
+amtool позволяет отправить оповещение в Alertmanager так, как это
+сделал бы Prometheus: удобно для проверки получателей и маршрутов.
+
+  amtool alert add InstanceDown instance=10.0.2.11:9100 severity=critical \
+    --alertmanager.url=http://localhost:9093
+  amtool alert add DiskWillFillIn4Hours instance=10.0.2.13:9100 severity=warning \
+    --annotation summary='Диск заполнится за 4 часа' \
+    --alertmanager.url=http://localhost:9093
+
+  amtool alert query --alertmanager.url=http://localhost:9093
+  amtool alert query alertname=InstanceDown --alertmanager.url=http://localhost:9093
+  amtool alert query --output=json --alertmanager.url=http://localhost:9093
+
+
+=========================================================================
+6.3. БЕЗЗВУЧНЫЙ РЕЖИМ (SILENCES)
+=========================================================================
+
+Дежурный замолкает на время работ. Правило курса: silence ставится
+на метку со значением из реестра, иначе он не совпадёт ни с чем.
+
+  amtool silence add alertname=InstanceDown --duration=1h \
+    --comment='работы на web1' --alertmanager.url=http://localhost:9093
+  amtool silence add instance=10.0.2.13:9100 --duration=30m \
+    --comment='обновление app1' --alertmanager.url=http://localhost:9093
+  amtool silence add env=lab --duration='2026-02-01T12:00:00Z' \
+    --comment='плановые работы' --alertmanager.url=http://localhost:9093
+
+  amtool silence query --alertmanager.url=http://localhost:9093
+  amtool silence query instance=10.0.2.13:9100 --alertmanager.url=http://localhost:9093
+
+Продлить или снять досрочно:
+
+  amtool silence expire 8f4b1c2e-0d5a-4b6c-9f11-2a3b4c5d6e7f --alertmanager.url=http://localhost:9093
+  amtool silence update --expires=2h 8f4b1c2e-0d5a-4b6c-9f11-2a3b4c5d6e7f --alertmanager.url=http://localhost:9093
+
+ЧЕГО НЕ ДЕЛАТЬ: ставить silence на alertname без instance, когда
+работы идут на одной машине. Такой silence замолчит и все остальные
+машины с тем же оповещением, и поломку заметят позже.
+
+
+=========================================================================
+6.4. ПРОВЕРКА ЦЕПОЧКИ ЦЕЛИКОМ
+=========================================================================
+
+Порядок разбора «оповещение не пришло»: сначала правило, потом
+Alertmanager, потом получатель.
+
+  curl -s http://localhost:9090/api/v1/alerts | python3 -m json.tool
+  curl -s http://localhost:9093/api/v2/alerts | python3 -m json.tool
+  curl -s http://localhost:9093/api/v2/status | python3 -m json.tool | head -20
+  journalctl -u alertmanager -n 50 --no-pager | grep -i 'notify\|error'
+  grep -A5 'alerting' /etc/prometheus/prometheus.yml
+
+
+#########################################################################
+ЧАСТЬ 7. СПРАВОЧНЫЕ ТАБЛИЦЫ
+#########################################################################
+
+
+=========================================================================
+7.1. ПОРТЫ СТЕНДА
+=========================================================================
+
+  Служба                        Порт   Где
+  ---------------------------------------------------------------------
+  Prometheus (веб и API)        9090   mon
+  Alertmanager (веб и API)      9093   mon
+  Grafana                       3000   mon
+  Pushgateway                   9091   mon
+  blackbox_exporter             9115   mon
+  cAdvisor                      8080   app1
+  node_exporter                 9100   все Linux-машины
+  postgres_exporter             9187   db1
+  nginx-prometheus-exporter     9113   web1
+  nginx stub_status             8081   web1
+  windows_exporter              9182   win1
+  свой экспортёр lab_exporter   9200   mon
+
+Порты 8080 и 8081 разведены намеренно: cAdvisor и stub_status
+встречаются в одной практике, и совпадение номеров сломало бы стенд.
+
+Проверить разом, кто слушает нужные порты на машине:
+
+  ss -lntp | grep -E ':(3000|8080|8081|9090|9091|9093|9100|9113|9115|9182|9187|9200)'
+
+
+=========================================================================
+7.2. КАТАЛОГИ СТЕНДА
+=========================================================================
+
+  Что                              Путь
+  ---------------------------------------------------------------------
+  Исполняемые файлы                /usr/local/bin
+  Конфигурация Prometheus          /etc/prometheus
+  Данные Prometheus (TSDB)         /var/lib/prometheus
+  Конфигурация Alertmanager        /etc/alertmanager
+  Данные Alertmanager              /var/lib/alertmanager
+  Конфигурация Grafana             /etc/grafana
+  Провижининг Grafana              /etc/grafana/provisioning
+  Дашборды Grafana как код         /var/lib/grafana/dashboards
+  Конфигурация blackbox_exporter   /etc/blackbox_exporter
+  Свой экспортёр                   /opt/lab_exporter
+  Загрузки стенда                  /home/engineer/distr
+
+Правило одно: исполняемые файлы — в /usr/local/bin, конфигурация —
+в /etc/<служба>, данные — в /var/lib/<служба>. Это же правило
+понадобится при разборе «служба не стартует»: девять отказов
+из десяти — права на каталог данных, а не ошибка в конфигурации.
+
+  du -sh /var/lib/prometheus
+  ls -ld /var/lib/prometheus /etc/prometheus
+  sudo chown -R prometheus:prometheus /var/lib/prometheus
+
+
+=========================================================================
+7.3. ТИПЫ МЕТРИК
+=========================================================================
+
+  Тип         Что означает              Что можно          Суффиксы
+  ---------------------------------------------------------------------
+  counter     только растёт             rate, increase,    _total
+                                        irate, resets      _seconds_total
+  gauge       значение в обе стороны    avg, max, delta,   нет
+                                        predict_linear
+  histogram   распределение по бакетам  histogram_quantile _bucket, _sum,
+                                                           _count
+  summary     квантили считает сам      квантили по метке  нет
+              экспортёр                 quantile
+
+ЧЕГО НЕ ДЛАТЬ: применять avg() и среднее к счётчику. Счётчик растёт
+монотонно, и его среднее не значит ничего: сначала rate(), потом
+агрегация. И наоборот: rate() на gauge считается, но показывает
+скорость изменения величины, а не то, что обычно имеют в виду.
+
+  # счётчик: сначала rate, потом агрегация
+  sum by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))
+
+  # gauge: агрегация сразу
+  avg by (instance) (node_memory_MemAvailable_bytes)
+
+
+=========================================================================
+7.4. ЗАДАНИЯ И ВНЕШНИЕ МЕТКИ
+=========================================================================
+
+  job_name        Цели                                    Метки
+  ---------------------------------------------------------------------
+  prometheus      localhost:9090                          —
+  node            10.0.2.5:9100, 10.0.2.11:9100,         env=lab
+                  10.0.2.12:9100, 10.0.2.13:9100
+  nginx           10.0.2.11:9113                          env=lab
+  postgres        10.0.2.12:9187                          env=lab
+  docker          10.0.2.13:8080                          env=lab
+  windows         10.0.2.21:9182                          env=lab
+  blackbox_http   https://prometheus.io, http://10.0.2.11  env=lab
+  pushgateway     localhost:9091                          env=lab
+  lab_exporter    10.0.2.5:9200                           env=lab
+
+Внешние метки (external_labels) задаются один раз в global и дальше
+видны в каждом запросе и в каждом оповещении:
+
+  global:
+    scrape_interval: 15s
+    evaluation_interval: 15s
+    external_labels:
+      env: lab
+      monitor: prometheus-01
+      host: mon
+
+
+#########################################################################
+ЧАСТЬ 8. МЕТРИКИ
+#########################################################################
+
+
+=========================================================================
+8.1. ОСНОВНЫЕ МЕТРИКИ NODE_EXPORTER
+=========================================================================
+
+  Метрика                                 Что показывает
+  ---------------------------------------------------------------------
+  node_cpu_seconds_total                  время CPU по режимам
+                                          (метки cpu, mode)
+  node_load1                              средняя нагрузка за 1 минуту
+  node_load5                              средняя нагрузка за 5 минут
+  node_memory_MemTotal_bytes              всего оперативной памяти
+  node_memory_MemAvailable_bytes          доступно памяти без свопа
+  node_memory_MemFree_bytes               совсем свободная память
+  node_memory_SwapTotal_bytes             размер раздела подкачки
+  node_filesystem_size_bytes              размер файловой системы
+  node_filesystem_avail_bytes             свободно для пользователя
+  node_filesystem_free_bytes              свободно с резервом root
+  node_disk_read_bytes_total              прочитано с диска
+  node_disk_written_bytes_total           записано на диск
+  node_network_receive_bytes_total        принято по интерфейсу
+  node_network_transmit_bytes_total       отправлено по интерфейсу
+  node_network_receive_errs_total         ошибок приёма
+  node_boot_time_seconds                  время загрузки машины
+  node_time_seconds                       текущее время машины
+  node_procs_running                      процессов в состоянии run
+  node_exporter_build_info                версия экспортёра (значение 1)
+  node_uname_info                         сведения о ядре и хосте
+
+Про метрики вида node_*_info: значение всегда 1, а полезное лежит
+в метках. Это способ приделать к ряду свойства, которые не меняются:
+hostname, release, version.
+
+  node_exporter_build_info{version="1.12.1"} 1
+  node_uname_info{nodename="mon",release="6.14.0-40-generic"} 1
+
+Время работы машины считается из времени загрузки:
+
+  time() - node_boot_time_seconds
+
+
+=========================================================================
+8.2. МЕТРИКИ PROMETHEUS О САМОМ СЕБЕ
+=========================================================================
+
+  Метрика                                     Что показывает
+  ---------------------------------------------------------------------
+  up                                          связь с целью: 1 или 0
+  scrape_duration_seconds                     сколько длился сбор цели
+  scrape_samples_scraped                      сколько образцов собрано
+  scrape_samples_post_metric_relabeling       сколько осталось после
+                                              перемаркировки
+  prometheus_build_info                       версия Prometheus (1)
+  prometheus_tsdb_head_series                 серий в голове TSDB
+  prometheus_tsdb_head_samples_appended_total образцов добавлено
+  prometheus_config_last_reload_successful    последняя перезагрузка
+                                              конфигурации прошла
+  prometheus_rule_evaluation_failures_total   ошибок вычисления правил
+  prometheus_rule_evaluation_duration_seconds время вычисления правил
+  prometheus_target_scrape_pool_targets       целей в задании
+  prometheus_http_requests_total              запросов к API
+  prometheus_notifications_total              отправлено оповещений
+  prometheus_notifications_errors_total       ошибок отправки
+  prometheus_remote_storage_queue_highest_sent_timestamp_seconds
+                                              очередь remote_write
+
+Три метрики, которые стоит проверять первыми при любой поломке:
+
+  up == 0
+  prometheus_config_last_reload_successful == 0
+  prometheus_tsdb_head_series
+
+Первая говорит о связи, вторая — о том, что конфигурация не применилась,
+третья — о том, что база растёт. Практика 15 добавляет сюда
+alertmanager_notifications_failed_total.
+
+
+=========================================================================
+8.3. МЕТРИКИ ЭКСПОРТЁРОВ СЕРВИСОВ
+=========================================================================
+
+  nginx_connections_active        активные соединения nginx
+  nginx_connections_handled       обработано соединений
+  nginx_http_requests_total       обработано запросов
+  nginx_up                        экспортёр видит stub_status
+
+  pg_up                           экспортёр подключился к базе
+  pg_stat_database_numbackends    подключений к базе
+  pg_stat_database_xact_commit    зафиксированных транзакций
+  pg_stat_activity_count          сессий по состояниям
+  pg_settings_max_connections     предел подключений
+
+  container_cpu_usage_seconds_total     время CPU контейнера
+  container_memory_working_set_bytes    память контейнера
+  container_network_receive_bytes_total принято контейнером
+  container_fs_usage_bytes              занято контейнером на диске
+
+  windows_os_info                  версия Windows (1)
+  windows_cs_hostname              имя машины (1)
+  windows_logical_disk_free_bytes  свободно на разделе
+  windows_cpu_time_total           время CPU по режимам
+  windows_memory_available_bytes   доступно памяти
+
+  probe_success                    проверка извне прошла
+  probe_duration_seconds           сколько длилась проверка
+  probe_http_status_code           код ответа HTTP
+  probe_ssl_earliest_cert_expiry   когда истекает сертификат
+  probe_dns_lookup_time_seconds    время разрешения имени
+
+Свои метрики курса:
+
+  lab_job_last_success_timestamp_seconds   когда задание отработало
+  lab_batch_jobs_total                     счётчик запусков задания
+  lab_queue_depth                          глубина очереди
+  lab_job_duration_seconds                 гистограмма длительности
+
+
+#########################################################################
+ЧАСТЬ 9. СВОДКА PROMQL
+#########################################################################
+
+
+=========================================================================
+9.1. ЧТО ТАКОЕ ЯЗЫК ЗАПРОСОВ
+=========================================================================
+
+Запрос всегда начинается с селектора: имя метрики и фильтры по меткам
+в фигурных скобках. Пустой селектор {} запрещён — он означает «все
+серии всех метрик», и на боевом сервере такой запрос убивает Prometheus.
+
+  node_load1
+  node_load1{instance="10.0.2.11:9100"}
+  node_load1{instance=~"10.0.2.1[123]:9100"}
+  up{job="node",env="lab"}
+  {__name__=~"node_load.+"}
+
+Операторы сопоставления: =, !=, =~, !~. Регулярные выражения
+привязаны к строке целиком: node_load1{job=~"node"} не совпадёт
+с заданием node_exporter.
+
+
+=========================================================================
+9.2. ФУНКЦИИ И ОПЕРАЦИИ: ЧТО ДЕЛАЕТ И КАК ВЫГЛЯДИТ
+=========================================================================
+
+  Функция или операция   Что делает                     Пример
+  ---------------------------------------------------------------------
+  rate()                 средняя скорость роста          rate(node_cpu_seconds_total
+                         счётчика за диапазон            {mode="idle"}[5m])
+  irate()                скорость по последним двум      irate(node_cpu_seconds_total
+                         точкам                          {mode="idle"}[5m])
+  increase()             прирост счётчика за диапазон    increase(node_network_receive
+                                                         _bytes_total[1h])
+  delta()                изменение gauge за диапазон     delta(node_memory_MemFree_bytes
+                                                         [1h])
+  idelta()               изменение по двум точкам        idelta(node_load1[5m])
+  deriv()                скорость изменения gauge        deriv(node_filesystem_avail_bytes
+                                                         [1h])
+  predict_linear()       когда величина достигнет нуля   predict_linear(node_filesystem
+                                                         _avail_bytes[6h], 4*3600)
+  histogram_quantile()   квантиль по бакетам             histogram_quantile(0.95,
+                                                         sum by (le) (rate(..._bucket[5m])))
+  absent()               вернёт ряд, если рядов нет      absent(up{job="node"})
+  absent_over_time()     вернёт ряд, если ряда не было   absent_over_time(node_load1[1h])
+                         весь диапазон
+  topk()                 первые k рядов по значению      topk(5, node_filesystem_avail_bytes)
+  bottomk()              последние k рядов               bottomk(3, up)
+  count_values()         считает ряды с каждым значением count_values("version",
+                                                         node_exporter_build_info)
+  clamp_max()            ограничивает значение сверху    clamp_max(up, 1)
+  clamp_min()            ограничивает значение снизу     clamp_min(node_load1, 0)
+  round()                округляет до шага               round(rate(node_cpu_seconds_total
+                                                         [5m]), 0.01)
+  sort_desc()            сортирует по убыванию           sort_desc(topk(5, up))
+  sort()                 сортирует по возрастанию        sort(up)
+  time()                 текущее время в секундах        time() - node_boot_time_seconds
+  vector()               превращает число в ряд          vector(1)
+  sum by ()              складывает ряды по меткам       sum by (instance) (up)
+  avg by ()              среднее по меткам               avg by (instance) (node_load1)
+  max by (), min by ()   максимум и минимум по меткам    max by (instance) (node_load1)
+  count by ()            считает ряды                    count by (job) (up)
+  stddev by ()           разброс значений                stddev by (instance) (node_load1)
+  quantile by ()         квантиль по значениям вектора  quantile(0.5, node_load1)
+  без агрегации          арифметика и сопоставление      node_memory_MemTotal_bytes -
+                                                         node_memory_MemAvailable_bytes
+  on() / ignoring()      выбор общих меток при операции  a / on(instance) group_left b
+  group_left             берёт метки с левой стороны     sum by (instance) (up)
+                                                         / on(instance) group_left
+                                                         count by (instance) (up)
+  and, or, unless        логические операции над рядами  up == 1 and on(instance)
+                                                         node_load1 > 2
+  > bool                 сравнение с нулём и единицей    (node_load1 > 2) bool
+  offset 1h              сдвиг назад по времени          node_load1 offset 1h
+  @ 1700000000           значение на момент времени      node_load1 @ 1700000000
+  @ start() и @ end()    границы выбранного диапазона    node_load1 @ start()
+
+ПОЧЕМУ ИМЕННО ТАК в правилах берут rate(), а не irate(): irate
+смотрит на две последние точки и на редком сборе даёт рваный график,
+который то и дело срабатывает в оповещении. rate() усредняет
+по всему диапазону — правило ведёт себя предсказуемо.
+
+ВАЖНО: rate() требует минимум двух точек внутри диапазона. При
+интервале сбора 15s и окне [30s] точек ровно две, результат может
+быть пустым. Берите окно не меньше четырёх интервалов: [1m] и больше.
+
+
+=========================================================================
+9.3. ГОТОВЫЕ ЗАПРОСЫ КУРСА
+=========================================================================
+
+Загрузка CPU по машинам (idle вычитается из единицы):
+
+  1 - avg by (instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))
+
+Занятая память в процентах:
+
+  100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)
+
+Свободное место на разделах, кроме служебных:
+
+  100 * node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"}
+  / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}
+
+Скорость приёма трафика в байтах в секунду:
+
+  rate(node_network_receive_bytes_total{device!="lo"}[5m])
+
+Когда закончится место при текущей скорости:
+
+  predict_linear(node_filesystem_avail_bytes{fstype!~"tmpfs"}[6h], 4*3600) < 0
+
+Девяносто пятый процентиль длительности задания своего экспортёра:
+
+  histogram_quantile(0.95, sum by (le) (rate(lab_job_duration_seconds_bucket[5m])))
+
+Количество целей по заданиям:
+
+  count by (job) (up)
+
+Цели, которые не собираются:
+
+  up == 0
+
+Сертификат истекает раньше чем через 14 дней:
+
+  probe_ssl_earliest_cert_expiry - time() < 14 * 24 * 3600
+
+Свежесть задания из textfile или Pushgateway:
+
+  time() - lab_job_last_success_timestamp_seconds > 3600
+
+Топ-10 метрик по числу серий (поиск виновника кардинальности):
+
+  topk(10, count by (__name__) ({__name__=~".+"}))
+
+
+#########################################################################
+ЧАСТЬ 10. ЧАСТЫЕ ОПЕЧАТКИ
+#########################################################################
+
+
+=========================================================================
+10.1. ОПЕЧАТКИ В КОНФИГУРАЦИИ
+=========================================================================
+
+  Написано                Должно быть            Что будет
+  ---------------------------------------------------------------------
+  scrape_interval: 15     scrape_interval: 15s   интервал станет
+                                                 нулевым: число
+                                                 читается как
+                                                 наносекунды
+  evaluation_interval: 1m evaluation_interval: 1m то же самое
+  retention: 15           retention: 15d         срок хранения
+                                                 в наносекундах
+  retention.time: 10y     retention.time: 10y    единица обязательна
+                                                 и здесь
+
+ЧЕГО НЕ ДЕЛАТЬ: писать единицу времени через пробел — 15 s.
+YAML прочитает это как строку «15 s», и Prometheus откажется
+запускаться с сообщением о неверном значении длительности.
+
+ЧЕГО НЕ ДЕЛАТЬ: вкладывать static_configs внутрь global. Оба ключа
+живут на разных уровнях: global описывает поведение сервера,
+scrape_configs — список заданий. Ошибка видна на первом же
+promtool check config.
+
+Разделитель в YAML — двоеточие и пробел после него. Запись
+job_name:node читается как одно значение, а не как ключ и значение.
+
+  # неверно
+  - job_name:node
+  # верно
+  - job_name: node
+
+Отступы — только пробелы, шаг в два пробела. Табуляция в YAML
+запрещена, и глазом она не отличается от пробела:
+
+  grep -Pn "\t" /etc/prometheus/prometheus.yml
+  sed -n '1,40p' /etc/prometheus/prometheus.yml | cat -A | grep '\^I'
+
+
+=========================================================================
+10.2. ОПЕЧАТКИ В PROMQL
+=========================================================================
+
+  Написано             Должно быть          Что будет
+  ---------------------------------------------------------------------
+  up = 0               up == 0              parse error: с одним
+                                            знаком равенства это
+                                            не сравнение
+  up =~ 0              up == 0              =~ сравнивает строки
+                                            меток, а не значения
+  up == "0"            up == 0              сравнение числа
+                                            со строкой не сработает
+  node_load1 > 2 bool  (node_load1 > 2)    bool пишется вне
+                       bool                 скобок условия
+  node_load1{job=node} node_load1{job="node"} значения меток
+                                            всегда в кавычках
+  node_load1[5m]       rate(node_load1[5m]) range vector нельзя
+                                            показать в Graph
+  {__name__=".+")      {__name__=~".+"}     для шаблонов нужен =~
+
+Две ошибки, которые встречаются чаще остальных:
+
+  # неверно: range vector там, где нужен instant vector
+  node_cpu_seconds_total[5m]
+
+  # верно: сначала функция, она возвращает instant vector
+  rate(node_cpu_seconds_total[5m])
+
+  # неверно: сравнение скаляра с вектором без учёта меток
+  node_filesystem_avail_bytes / 1000000000 > 0.9
+
+  # верно: сначала доля, потом порог
+  node_filesystem_avail_bytes / node_filesystem_size_bytes > 0.9
+
+ПОЧЕМУ ИМЕННО ТАК: оператор =~ в селекторе работает с метками
+и только с метками. Значение образца им не проверить — для этого
+служит == вне фигурных скобок. Запись up =~ "0" синтаксически
+допустима, но сравнивает строку метки, которой нет, и всегда
+даёт пустой результат.
+
+
+=========================================================================
+10.3. ПОРЯДОК ПРОВЕРКИ ПОСЛЕ ПРАВКИ
+=========================================================================
+
+Порядок один и тот же после любой правки конфигурации или правил:
+
+  1. promtool check config /etc/prometheus/prometheus.yml
+  2. promtool check rules /etc/prometheus/rules.yml
+  3. promtool test rules /etc/prometheus/tests/rules.test.yml
+  4. amtool check-config /etc/alertmanager/alertmanager.yml
+  5. curl -X POST http://localhost:9090/-/reload
+  6. открыть Status → Targets и Status → Configuration
+  7. journalctl -u prometheus -n 30 --no-pager
+
+Проверка на одной строке — удобно вставлять в историю и в конвейер:
+
+  promtool check config /etc/prometheus/prometheus.yml && promtool check rules /etc/prometheus/rules.yml && curl -sX POST http://localhost:9090/-/reload
+
+ЕСЛИ ЧТО-ТО НЕ РАБОТАЕТ после перезагрузки — сначала смотрят
+prometheus_config_last_reload_successful и строку Loading configuration
+в логе, а не перезапускают службу. Перезапуск скроет ошибку,
+и следующий разбор начнётся с нуля.

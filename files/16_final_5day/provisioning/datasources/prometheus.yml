@@ -1,0 +1,36 @@
+# Источник данных Grafana как код. Практика 16, шаг 7.
+#
+# Файл кладётся в /etc/grafana/provisioning/datasources/prometheus.yml
+# и читается при запуске grafana-server. Источник, добавленный
+# мышью, живёт в базе Grafana и теряется при переносе: здесь он
+# определён файлом, лежит в git и восстанавливается вместе
+# с остальной конфигурацией.
+#
+# Пароль в basicAuthPassword не задан: у учебного Prometheus учётной
+# записи нет, наружу он закрыт обратным прокси. В рабочей среде
+# пароль берётся из переменной окружения и в файле не хранится.
+
+apiVersion: 1
+
+deleteDatasources:
+  - name: Prometheus
+    orgId: 1
+
+datasources:
+  - name: Prometheus
+    type: prometheus
+    access: proxy
+    orgId: 1
+    uid: lab-prometheus
+    url: http://10.0.2.5:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 15s
+      httpMethod: POST
+      manageAlerts: true
+      prometheusType: Prometheus
+      prometheusVersion: 3.15.0
+      exemplarTraceIdDestinations:
+        - name: trace_id
+          datasourceUid: lab-prometheus

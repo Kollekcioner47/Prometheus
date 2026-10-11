@@ -1,0 +1,1770 @@
+Практика 15. Эксплуатация мониторинга.
+
+ЭТА ПРАКТИКА — ПРО ТО, ЧТО МОНИТОРИНГ ТОЖЕ СЛУЖБА. У него есть
+конфигурация, версия, права, резервная копия и дежурный. Здесь мы
+научимся следить за самим мониторингом, копировать и восстанавливать
+его конфигурацию, обновлять версии по порядку, закрывать веб-
+интерфейсы прокси и разбирать инцидент до конца. Новых инструментов
+почти нет: всё, что нужно, уже стоит на стенде после практик 1–14.
+
+=========================================================================
+ЧТО МЫ СДЕЛАЕМ
+=========================================================================
+
+Соберём набор метрик, по которым видно состояние самого мониторинга:
+жива ли связь с целями, перечиталась ли конфигурация, не падают ли
+вычисления правил, не растёт ли неограниченно число рядов, доходят ли
+оповещения до получателя. Вынесем проверку наружу: blackbox_exporter
+с другой машины будет проверять тот же мониторинг, а правило
+«сторожевой пёс» превратит молчание в сигнал.
+
+Разберём резервное копирование: что копировать, что копировать
+бессмысленно и почему. Сделаем архив конфигурации, проверим его
+восстановлением в отдельный каталог и увидим, чем отличается
+восстановление конфигурации от восстановления данных.
+
+Разберём порядок обновления версии, проверку конфигурации до подмены
+бинарника и откат. Положим конфигурацию в git и напишем конвейер
+проверки: те же команды, что мы выполняли руками, но на каждом
+изменении.
+
+Закроем веб-интерфейсы обратным прокси с basic auth и TLS, разберём
+права служб и учётных записей, напишем runbook дежурного и разберём
+инцидент целиком: диск заполнен, а оповещения не было.
+
+=========================================================================
+ЧТО ПОНАДОБИТСЯ
+=========================================================================
+
+СТЕНД ИЗ ПРАКТИК 1–14 в рабочем состоянии:
+
+  * mon 10.0.2.5 — Prometheus, Alertmanager, Grafana, node_exporter,
+    blackbox_exporter, Pushgateway;
+  * web1 10.0.2.11 — nginx, nginx-prometheus-exporter, node_exporter;
+  * db1 10.0.2.12 — PostgreSQL, postgres_exporter, node_exporter;
+  * app1 10.0.2.13 — Docker, cAdvisor, node_exporter, свой экспортёр
+    на порту 9200 из практики 13.
+
+Учётная запись engineer, пароль Console47, sudo без пароля. Службы
+на mon работают от пользователя prometheus.
+
+ЧТО ДОЛЖНО БЫТЬ СДЕЛАНО РАНЬШЕ:
+
+  * правила оповещения из практики 8 подключены через rule_files;
+  * Alertmanager из практики 9 связан с Prometheus и имеет хотя бы
+    одного получателя (в курсе это учебный webhook);
+  * blackbox_exporter из практики 12 отвечает на порту 9115;
+  * в /etc/prometheus/rules/ лежит хотя бы один файл правил.
+
+ФАЙЛЫ КУРСА. Из каталога files/15_operations/ понадобятся:
+
+  * ci/.gitlab-ci.yml — конвейер проверки конфигураций;
+  * ci/.yamllint — настройки проверки синтаксиса YAML;
+  * nginx/prometheus.conf — обратный прокси с TLS и basic auth;
+  * web.yml — файл веб-конфигурации с bcrypt-хешем;
+  * runbook.md — образец инструкции дежурному;
+  * backup_restore.md — что копировать и как проверять.
+
+ВРЕМЯ. Практика рассчитана на два академических часа. Если стенд
+поднимается заново, добавьте время на практики 1–9: без работающего
+Alertmanager половина шагов не проверяется.
+
+#########################################################################
+ЧАСТЬ 1. НАБЛЮДЕНИЕ ЗА МОНИТОРИНГОМ, КОПИИ И ОБНОВЛЕНИЕ
+#########################################################################
+
+=========================================================================
+ШАГ 1. КТО СТОРОЖИТ СТОРОЖА
+=========================================================================
+
+Начнём с вопроса, который задают на каждом разборе инцидента:
+а кто заметит, что сломался сам Prometheus?
+
+Ответ «дежурный заметит по графику» не годится. График смотрят,
+когда что-то уже произошло. Ответ «правило InstanceDown» тоже
+не годится: это правило вычисляет Prometheus, и если он не работает,
+правило не вычисляется тоже. Мониторинг, следящий только за другими,
+слеп ровно в тот момент, когда он нужен больше всего.
+
+Отсюда принцип: у мониторинга есть свои метрики, и по ним строится
+такой же набор правил, как для обычных машин. Разница в том, что эти
+правила должны быть нечувствительны к отказу самого Prometheus —
+об этом в шаге 3.
+
+ПОЧЕМУ ИМЕННО ТАК: собственные метрики Prometheus отдаёт на том же
+порту 9090 по адресу /metrics. Собирает он их тем же заданием
+prometheus, которое мы завели в практике 1. Отдельный экспортёр для
+этого не нужен, и это редкий случай, когда экспортёр — сам сервис.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: разделение «мониторинг наблюдает за парком» и
+«мониторинг наблюдает за собой» проходит через всю эксплуатацию.
+У крупных установок это два разных экземпляра Prometheus на разных
+машинах, и один из них намеренно «глупее» второго.
+
+=========================================================================
+ШАГ 2. НАБОР МЕТРИК: ЧТО ИМЕННО ПОКАЗЫВАЕТ СОСТОЯНИЕ
+=========================================================================
+
+Пять метрик, которые нужно смотреть в первую очередь. Каждая
+отвечает на свой вопрос, и вместе они покрывают всю цепочку:
+сбор — конфигурация — правила — объём — доставка.
+
+  up
+      Связь с целью. Значение 0 означает «собрать метрики не
+      удалось», и это утверждение о связи, а не о машине.
+
+  prometheus_config_last_reload_successful
+      Перечиталась ли последняя перезагрузка конфигурации.
+      0 означает, что Prometheus продолжает работать
+      со старой конфигурацией, а изменения не применились.
+
+  prometheus_rule_evaluation_failures_total
+      Счётчик неудачных вычислений правил. Растёт — значит
+      какое-то правило не вычисляется, и оповещение может
+      не сработать никогда.
+
+  prometheus_tsdb_head_series
+      Число рядов в «голове» базы. Это мера кардинальности:
+      растёт быстрее, чем парк машин, — значит кто-то добавил
+      метку с высоким разнообразием.
+
+  alertmanager_notifications_failed_total
+      Неудачные попытки отправки. Эту метрику отдаёт
+      Alertmanager, а не Prometheus, и собирается она
+      отдельным заданием.
+
+ПРОВЕРКА: посмотрим три метрики самого Prometheus сразу, одним
+запросом. В веб-интерфейсе http://10.0.2.5:9090 на вкладке Graph
+введите:
+
+  up{env="lab"} == 0
+
+Пустой результат — хороший: все цели доступны. Если ряды есть,
+в колонке Value стоит 0, а в колонке Labels видно, какая именно
+цель недоступна.
+
+Дальше две служебные:
+
+  prometheus_config_last_reload_successful
+  prometheus_tsdb_head_series
+
+Первая должна дать 1. Вторая даёт число — на стенде курса это
+единицы тысяч, точное значение зависит от того, сколько времени
+работает стенд.
+
+ПОЧЕМУ ИМЕННО ТАК: из этого списка исключены метрики вроде
+prometheus_build_info и prometheus_tsdb_head_chunks. Они полезны
+при разборе конкретной поломки, но отвечать на вопрос «всё ли
+в порядке» по ним нельзя: они меняются при обновлении версии
+и при обычном уплотнении блоков.
+
+ЧЕГО НЕ ДЕЛАТЬ: не строить оповещение на абсолютном значении
+prometheus_tsdb_head_series. «Больше ста тысяч рядов» на одной
+установке — норма, на другой — авария. Порог берётся от baseline
+конкретного стенда, а не из чужой статьи.
+
+=========================================================================
+ШАГ 3. ПРАВИЛА ДЛЯ САМОГО МОНИТОРИНГА
+=========================================================================
+
+Создадим отдельный файл правил. Держать правила мониторинга вместе
+с правилами парка неудобно: у них разный владелец и разный порог
+«пора звонить».
+
+  sudo tee /etc/prometheus/rules/watchdog.rules.yml > /dev/null <<'EOF'
+  groups:
+    - name: lab.watchdog
+      interval: 15s
+      rules:
+        - alert: PrometheusConfigReloadFailed
+          expr: prometheus_config_last_reload_successful == 0
+          for: 5m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Конфигурация Prometheus не перечиталась"
+            description: >-
+              Последняя перезагрузка конфигурации закончилась
+              ошибкой. Prometheus работает со старой версией.
+
+        - alert: PrometheusRuleEvaluationFailing
+          expr: increase(prometheus_rule_evaluation_failures_total[15m]) > 0
+          for: 15m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Правила Prometheus не вычисляются"
+            description: >-
+              За последние пятнадцать минут есть неудачные
+              вычисления правил.
+
+        - alert: AlertmanagerNotificationsFailing
+          expr: increase(alertmanager_notifications_failed_total[15m]) > 0
+          for: 10m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Alertmanager не может отправить оповещение"
+            description: >-
+              Счётчик неудачных отправок растёт. Оповещения
+              не доходят до получателя.
+
+        - alert: Watchdog
+          expr: vector(1)
+          labels:
+            severity: info
+          annotations:
+            summary: "Цепочка оповещения жива"
+            description: >-
+              Это оповещение горит всегда. Молчание этого
+              правила означает, что сломана цепочка доставки.
+  EOF
+
+Правило Watchdog отличается от остальных: его условие vector(1)
+истинно всегда. Оно не сообщает о проблеме — оно подтверждает, что
+цепочка «Prometheus — Alertmanager — получатель» работает целиком.
+
+ПОЧЕМУ ИМЕННО ТАК: молчание — тоже сигнал, но только если известно,
+что звук должен быть. Обычные правила молчат, когда всё хорошо,
+и отличить «хорошо» от «сломан Alertmanager» по ним невозможно.
+Постоянно горящее оповещение снимает эту неопределённость: его
+отсутствие у получателя — доказательство отказа.
+
+ПРОВЕРКА: файл должен проходить проверку до перезагрузки:
+
+  promtool check rules /etc/prometheus/rules/watchdog.rules.yml
+  SUCCESS: 4 rules found
+
+Подключим файл в prometheus.yml и перечитаем конфигурацию:
+
+  sudo sed -i 's#- /etc/prometheus/rules/lab.rules.yml#- /etc/prometheus/rules/lab.rules.yml\n  - /etc/prometheus/rules/watchdog.rules.yml#' \
+    /etc/prometheus/prometheus.yml
+  sudo -u prometheus promtool check config /etc/prometheus/prometheus.yml
+  curl -s -X POST http://localhost:9090/-/reload
+
+ЧЕГО НЕ ДЕЛАТЬ: не ждите, что Watchdog появится в Alertmanager
+мгновенно. Правило со значением vector(1) переходит в Firing сразу
+(у него нет for), но Alertmanager ещё держит его в группе столько,
+сколько задано в group_wait. При group_wait: 30s это полминуты.
+
+=========================================================================
+ШАГ 4. ВНЕШНЯЯ ПРОВЕРКА: BLACKBOX С ДРУГОЙ МАШИНЫ
+=========================================================================
+
+Правило Watchdog вычисляется внутри Prometheus. Если Prometheus
+упал целиком, оповещения не будет — потому что вычислять его
+некому. Последний рубеж — проверка извне, с другой машины.
+
+blackbox_exporter стоит на mon в практике 12. Для внешней проверки
+нужен второй экземпляр на другой машине: поставим его на web1.
+Проверять он будет не цели парка, а сам мониторинг.
+
+  ssh engineer@10.0.2.11
+
+  cd /home/engineer/distr
+  wget https://github.com/prometheus/blackbox_exporter/releases/download/v0.29.0/blackbox_exporter-0.29.0.linux-amd64.tar.gz
+  tar xzf blackbox_exporter-0.29.0.linux-amd64.tar.gz
+  sudo cp blackbox_exporter-0.29.0.linux-amd64/blackbox_exporter /usr/local/bin/
+  sudo useradd --no-create-home --shell /usr/bin/false blackbox
+  sudo mkdir -p /etc/blackbox_exporter
+  sudo tee /etc/blackbox_exporter/blackbox.yml > /dev/null <<'EOF'
+  modules:
+    tcp_connect:
+      prober: tcp
+      timeout: 5s
+    http_2xx:
+      prober: http
+      timeout: 5s
+      http:
+        preferred_ip_protocol: ip4
+  EOF
+  sudo chown -R blackbox:blackbox /etc/blackbox_exporter
+
+Юнит-файл отличается от того, что мы делали на mon, только адресом
+прослушивания: на web1 порт 9115 свободен, но слушать наружу нужно
+всё равно явно.
+
+  sudo tee /etc/systemd/system/blackbox_exporter.service > /dev/null <<'EOF'
+  [Unit]
+  Description=Blackbox Exporter (external checks)
+  Wants=network-online.target
+  After=network-online.target
+
+  [Service]
+  User=blackbox
+  Group=blackbox
+  Type=simple
+  ExecStart=/usr/local/bin/blackbox_exporter \
+    --config.file=/etc/blackbox_exporter/blackbox.yml \
+    --web.listen-address=:9115
+  Restart=on-failure
+
+  [Install]
+  WantedBy=multi-user.target
+  EOF
+
+  sudo systemctl daemon-reload
+  sudo systemctl enable --now blackbox_exporter
+  systemctl is-active blackbox_exporter
+  active
+
+ПРОВЕРКА: проверим сам мониторинг с web1. Проверяются две вещи:
+порт Prometheus и отдача метрик. Метрики важнее: страница может
+открыться из кэша, а /metrics — только у живого процесса.
+
+  curl -s 'http://localhost:9115/probe?target=10.0.2.5:9090&module=tcp_connect' | grep -E '^(probe_success|probe_duration_seconds)'
+  probe_success 1
+  probe_duration_seconds 0.0021
+
+  curl -s 'http://localhost:9115/probe?target=http://10.0.2.5:9090/-/ready&module=http_2xx' | grep -E '^(probe_success|probe_http_status_code)'
+  probe_success 1
+  probe_http_status_code 200
+
+ПОЧЕМУ ИМЕННО ТАК: проверяется точка /-/ready, а не главная страница.
+Главная страница отдаётся статикой и открывается даже у Prometheus,
+который не смог загрузить конфигурацию и не собирает метрики.
+/-/ready отвечает кодом 200 только тогда, когда сервер готов
+обслуживать запросы.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: внешняя проверка — единственный способ узнать
+о недоступности мониторинга, когда недоступен сам мониторинг.
+Именно так устроены «чёрные ящики» в рабочей среде: два независимых
+наблюдателя, каждый на своей машине.
+
+ВАЖНО: blackbox на web1 должен иметь доступ к порту 9090 на mon.
+Если между машинами стоит брандмауэр, проверка будет давать
+probe_success 0 при живом Prometheus — и это будет ошибкой стенда,
+а не мониторинга. Проверьте до начала работы:
+
+  curl -s -o /dev/null -w '%{http_code}\n' http://10.0.2.5:9090/-/ready
+  200
+
+=========================================================================
+ШАГ 5. РЕЗЕРВНЫЕ КОПИИ: ЧТО КОПИРОВАТЬ
+=========================================================================
+
+Резервная копия мониторинга — это копия конфигурации. Не данных.
+Это неочевидно, поэтому разберём, почему.
+
+Конфигурация занимает килобайты и определяет, что мониторинг делает:
+какие цели собирает, какие правила вычисляет, кому и когда сообщает.
+Данные занимают гигабайты и определяют, что мониторинг помнит.
+При потере конфигурации данные нечем прочитать. При потере данных
+мониторинг продолжает работать: история начинается заново, но
+оповещения приходят.
+
+Копируем:
+
+  * /etc/prometheus/prometheus.yml и каталоги rules/ и targets/;
+  * /etc/alertmanager/alertmanager.yml и каталог templates/;
+  * /etc/grafana/provisioning/ и /var/lib/grafana/dashboards/;
+  * /etc/grafana/grafana.ini;
+  * /etc/blackbox_exporter/blackbox.yml;
+  * юнит-файлы служб из /etc/systemd/system/.
+
+Не копируем:
+
+  * /var/lib/prometheus/ — это база данных TSDB;
+  * /var/lib/alertmanager/ — история silence и групп;
+  * /var/lib/grafana/ — база Grafana, пересоздаётся;
+  * /home/engineer/distr/ — архивы релизов.
+
+ПОЧЕМУ ИМЕННО ТАК: копия TSDB не проверяется ни разу за свою жизнь.
+Она большая, её восстановление занимает часы, и проверять его
+на учебном стенде негде. Непроверенная копия — это не копия,
+а надежда. Копия конфигурации проверяется за две минуты и потому
+действительно существует.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: вопрос «что копировать» решается не размером,
+а ответом на вопрос «что я не смогу воспроизвести». Конфигурацию
+можно воспроизвести из git — и это лучше любой копии. Историю
+метрик воспроизвести нельзя, но для неё есть remote_write
+в отдельное хранилище, разобранное в практике 14.
+
+Файл files/15_operations/backup_restore.md собран из этого разбора
+и напечатан ниже целиком — с командами и с порядком восстановления
+на чистой машине.
+
+  Резервная копия мониторинга и проверка восстановления
+
+  Файл к шагу части 1 практики 15. Здесь собрано то, что нужно знать
+  о резервном копировании мониторинга до того, как копия понадобится.
+
+  Главная мысль
+
+  Мониторинг восстанавливается из конфигурации, а не из данных.
+  Конфигурация занимает килобайты, данные — гигабайты, и именно
+  конфигурация определяет, что мониторинг делает.
+
+  Обратное утверждение тоже верно и его стоит сказать прямо:
+  восстановление одного без другого не восстанавливает мониторинг.
+  Копия каталога данных при потерянной конфигурации даёт набор
+  непонятных каталогов с блоками, которые нечем прочитать.
+
+  Что копировать
+
+  В таблице три колонки: что копируем, где это лежит и зачем нужно
+  именно оно.
+
+    * Конфигурация Prometheus
+          где: /etc/prometheus/prometheus.yml
+          зачем: цели, интервалы сбора, внешние метки
+    * Файлы правил
+          где: /etc/prometheus/rules/
+          зачем: правила записи и правила оповещения
+    * Файлы обнаружения целей
+          где: /etc/prometheus/targets/
+          зачем: списки целей для file_sd
+    * Конфигурация Alertmanager
+          где: /etc/alertmanager/alertmanager.yml
+          зачем: дерево маршрутов, получатели, подавление
+    * Шаблоны сообщений
+          где: /etc/alertmanager/templates/
+          зачем: текст оповещений для получателя
+    * Провижининг Grafana
+          где: /etc/grafana/provisioning/
+          зачем: источник данных и провайдер дашбордов
+    * Дашборды как код
+          где: /var/lib/grafana/dashboards/
+          зачем: JSON дашбордов, взятые из git
+    * Настройки Grafana
+          где: /etc/grafana/grafana.ini
+          зачем: порт, пути, срок жизни сессии
+    * Юнит-файлы служб
+          где: /etc/systemd/system/*.service
+          зачем: как именно запускается служба и от какой учётной записи
+    * Конфигурация blackbox
+          где: /etc/blackbox_exporter/blackbox.yml
+          зачем: модули внешних проверок
+
+  Проверочные файлы для promtool (*.test.yml) копируются вместе
+  с правилами: без них после восстановления нельзя ответить
+  на вопрос «правило вообще работает».
+
+  Что не копировать
+
+    * База данных TSDB
+          где: /var/lib/prometheus/
+          почему нет: десятки гигабайт, и её восстановление
+          не восстанавливает мониторинг
+    * Данные Alertmanager
+          где: /var/lib/alertmanager/
+          почему нет: история silence и групп; потеря неприятна,
+          но не отказ
+    * Журналы
+          где: journalctl, /var/log/
+          почему нет: нужны для разбора, но не для восстановления
+    * Кэш Grafana
+          где: /var/lib/grafana/
+          почему нет: пересоздаётся сам
+    * Архивы релизов
+          где: /home/engineer/distr/
+          почему нет: скачиваются заново
+
+  Почему TSDB не копируют, хотя «данные же жалко»:
+
+  * она большая — на стенде курса это единицы гигабайт, в рабочей
+    среде это сотни гигабайт, и копия такого размера не проверяется
+    ни разу, а значит, восстановлению не подлежит;
+  * она быстро устаревает: копия часовой давности уже не отвечает
+    на вопрос «что было, когда сломалось»;
+  * она не восстанавливает мониторинг: Prometheus с целой TSDB
+    и без prometheus.yml не поднимется вообще;
+  * долгое хранение решается не копией, а remote_write в отдельное
+    хранилище — об этом была практика 14.
+
+  Копию TSDB делают, когда переносят Prometheus на другую машину
+  и хотят сохранить историю. Это отдельная задача с отдельным
+  порядком действий, и в курсе она не разбирается.
+
+  Команды
+
+  Копия делается на другую машину: копия на том же диске защищает
+  от ошибки человека, но не от отказа диска.
+
+    # На mon: собираем конфигурацию в один архив.
+    sudo tar czf /home/engineer/monitoring-config-$(date +%F).tar.gz \
+      -C / \
+      etc/prometheus \
+      etc/alertmanager \
+      etc/grafana/provisioning \
+      etc/grafana/grafana.ini \
+      etc/blackbox_exporter \
+      var/lib/grafana/dashboards \
+      etc/systemd/system/prometheus.service \
+      etc/systemd/system/alertmanager.service \
+      etc/systemd/system/blackbox_exporter.service
+
+    # На mon: закрываем архив от посторонних и отправляем на web1.
+    # В архиве лежит alertmanager.yml с токеном бота, поэтому права
+    # 600, а не 644 по умолчанию при umask 022.
+    sudo chmod 600 /home/engineer/monitoring-config-*.tar.gz
+    scp /home/engineer/monitoring-config-*.tar.gz engineer@10.0.2.11:/home/engineer/
+
+    # Контрольная сумма: нужна, чтобы отличить «архив побился»
+    # от «мы распаковали не то».
+    sha256sum /home/engineer/monitoring-config-*.tar.gz
+
+  Список файлов в архиве проверяется до отправки: tar tzf
+  показывает содержимое без распаковки.
+
+    tar tzf /home/engineer/monitoring-config-2026-05-14.tar.gz | head -20
+    etc/prometheus/prometheus.yml
+    etc/prometheus/rules/lab.rules.yml
+    etc/alertmanager/alertmanager.yml
+    ...
+
+  Проверка восстановления
+
+  Проверка делается в отдельный каталог и без остановки работающего
+  мониторинга. Копия, которую ни разу не распаковывали,
+  копией не является.
+
+    # Распаковываем в отдельный каталог, а не в корень.
+    mkdir -p /home/engineer/restore-check
+    tar xzf /home/engineer/monitoring-config-2026-05-14.tar.gz \
+      -C /home/engineer/restore-check
+    ls -R /home/engineer/restore-check/etc/prometheus
+
+  Проверка набранного из копии конфигурации — теми же командами,
+  что и обычно:
+
+    cd /home/engineer/restore-check/etc/prometheus
+    promtool check config prometheus.yml
+    promtool check rules rules/*.rules.yml
+    cd /home/engineer/restore-check/etc/alertmanager
+    amtool check-config alertmanager.yml
+
+  Проверка запуском — единственный способ убедиться, что конфигурация
+  не только разбирается, но и работает. Запускаем второй экземпляр
+  Prometheus из копии на свободном порту и с отдельным каталогом
+  данных. Работающий экземпляр при этом не трогаем.
+
+  Второй экземпляр запускается временной службой systemd, а не фоном
+  из оболочки: тогда у него свои журнал и признак активности, а после
+  перезагрузки он не остаётся в списке служб. Имя модуля указано
+  явно (--unit=prometheus-restore), иначе systemd присвоит случайное
+  и остановить экземпляр будет нечем.
+
+    sudo mkdir -p /var/lib/prometheus-restore
+    sudo chown prometheus:prometheus /var/lib/prometheus-restore
+    sudo systemd-run --unit=prometheus-restore \
+      --uid=prometheus --gid=prometheus \
+      /usr/local/bin/prometheus \
+      --config.file=/home/engineer/restore-check/etc/prometheus/prometheus.yml \
+      --storage.tsdb.path=/var/lib/prometheus-restore \
+      --web.listen-address=127.0.0.1:9097
+    curl -s localhost:9097/-/ready
+    Prometheus Server is Ready.
+
+  После проверки второй экземпляр останавливают и убирают за ним:
+
+    sudo systemctl stop prometheus-restore
+    sudo rm -rf /var/lib/prometheus-restore /home/engineer/restore-check
+
+  Порядок восстановления на чистой машине
+
+  1. Поставить те же версии из архивов: Prometheus 3.15.0,
+     Alertmanager 0.34.1, экспортёры — те же, что были.
+  2. Создать учётные записи служб: prometheus, node_exporter,
+     blackbox, pushgateway. Учётные записи — часть конфигурации,
+     и в архив они не попадают.
+  3. Создать каталоги: /etc/prometheus, /var/lib/prometheus,
+     /etc/alertmanager, /var/lib/alertmanager — с владельцем
+     prometheus и правами 0755.
+  4. Распаковать архив конфигурации поверх /.
+  5. Вернуть права: chmod 600 /etc/alertmanager/alertmanager.yml,
+     chown prometheus:prometheus /etc/prometheus/prometheus.yml.
+  6. Восстановить юнит-файлы, выполнить systemctl daemon-reload,
+     включить и запустить службы.
+  7. Проверить: promtool check config, amtool check-config,
+     страница Targets, тестовое оповещение.
+
+  Первые две минуты после восстановления Prometheus покажет пустые
+  графики. Это не ошибка: каталог данных пуст, и история начинается
+  заново. Ошибка — если после этого цели в состоянии DOWN: значит,
+  не восстановлены права или файлы обнаружения целей.
+
+  Чего не делать
+
+  * Не проверять копию распаковкой в корень работающей системы.
+    Ошибка в один путь затирает боевую конфигурацию — и тогда
+    восстановление понадобится раньше, чем планировалось.
+  * Не считать копией файл, который лежит рядом с оригиналом
+    на том же диске.
+  * Не отправлять архив с alertmanager.yml по почте или в мессенджер:
+    в нём токен бота и пароль SMTP.
+  * Не хранить копию только в одном месте и не проверять её раз в год.
+
+=========================================================================
+ШАГ 6. АРХИВ КОНФИГУРАЦИИ И ПРОВЕРКА ВОССТАНОВЛЕНИЯ
+=========================================================================
+
+Соберём архив на mon и отправим его на другую машину. Копия на том
+же диске защищает от ошибки человека, но не от отказа диска.
+
+  cd /
+  sudo tar czf /home/engineer/monitoring-config-$(date +%F).tar.gz \
+    etc/prometheus \
+    etc/alertmanager \
+    etc/grafana/provisioning \
+    etc/grafana/grafana.ini \
+    etc/blackbox_exporter \
+    var/lib/grafana/dashboards \
+    etc/systemd/system/prometheus.service \
+    etc/systemd/system/alertmanager.service \
+    etc/systemd/system/blackbox_exporter.service
+
+  tar tzf /home/engineer/monitoring-config-2026-05-14.tar.gz | head -5
+  etc/prometheus/
+  etc/prometheus/prometheus.yml
+  etc/prometheus/rules/
+  etc/prometheus/rules/lab.rules.yml
+  etc/prometheus/rules/watchdog.rules.yml
+
+ВАЖНО: в архиве лежит alertmanager.yml, а в нём токен бота и пароль
+SMTP. Файл архива получает права 600, а не 644: при umask 022
+архив по умолчанию читается всеми, кто вошёл на машину.
+
+  sudo chmod 600 /home/engineer/monitoring-config-*.tar.gz
+  scp /home/engineer/monitoring-config-*.tar.gz engineer@10.0.2.11:/home/engineer/
+  sha256sum /home/engineer/monitoring-config-*.tar.gz
+
+Контрольная сумма нужна не для красоты: она отличает «архив побился
+при передаче» от «мы распаковали не тот файл».
+
+Теперь главное: проверим восстановление. В отдельный каталог
+и без остановки работающего мониторинга.
+
+  mkdir -p /home/engineer/restore-check
+  tar xzf /home/engineer/monitoring-config-2026-05-14.tar.gz \
+    -C /home/engineer/restore-check
+  cd /home/engineer/restore-check/etc/prometheus
+  promtool check config prometheus.yml
+  SUCCESS: /home/engineer/restore-check/etc/prometheus/prometheus.yml is valid prometheus config file
+
+ПРОВЕРКА: конфигурация разбирается — это ещё не всё. Запустим
+второй экземпляр Prometheus из копии на свободном порту 9097
+и с отдельным каталогом данных. Работающий экземпляр не трогаем.
+Порт 9097 выбран потому, что 9090 занят службой, 9091 —
+Pushgateway, а 9095 — учебный приёмник уведомлений из практики 9.
+
+  sudo mkdir -p /var/lib/prometheus-restore
+  sudo chown prometheus:prometheus /var/lib/prometheus-restore
+  sudo systemd-run --unit=prometheus-restore \
+    --uid=prometheus --gid=prometheus \
+    /usr/local/bin/prometheus \
+    --config.file=/home/engineer/restore-check/etc/prometheus/prometheus.yml \
+    --storage.tsdb.path=/var/lib/prometheus-restore \
+    --web.listen-address=127.0.0.1:9097
+  curl -s localhost:9097/-/ready
+  Prometheus Server is Ready.
+
+  sudo systemctl stop prometheus-restore
+  sudo rm -rf /var/lib/prometheus-restore /home/engineer/restore-check
+
+Первые секунды второй экземпляр показывает пустые графики: каталог
+данных у него пуст. Это ожидаемо и ничего не говорит о качестве
+копии. О качестве копии говорит другое: конфигурация разобралась,
+правила подключились, служба ответила на /-/ready.
+
+ЧЕГО НЕ ДЕЛАТЬ: не распаковывайте архив в корень / работающей
+системы «чтобы проверить». Ошибка в один символ пути затрёт боевую
+конфигурацию, и восстановление понадобится раньше, чем вы его
+закончите проверять.
+
+ИСПРАВЛЕНО: о резервных копиях в прежней версии курса не говорилось
+ни слова. Из-за этого при переустановке терялось всё сразу: и сама
+конфигурация, и файлы правил, и дашборды Grafana, которые собирались
+мышью и жили в её базе. Восстановление означало «собрать заново
+по памяти», и каждый раз получалось не то, что было.
+
+=========================================================================
+ШАГ 7. ОБНОВЛЕНИЕ ВЕРСИИ: ПОРЯДОК И ОТКАТ
+=========================================================================
+
+Обновление мониторинга отличается от обновления обычной службы тем,
+что во время обновления мы теряем способность видеть парк. Обновлять
+всё сразу нельзя: если после обновления не работает оповещение,
+непонятно, что именно сломалось.
+
+Порядок:
+
+  1. Alertmanager — первым. Он не собирает метрики, и его обновление
+     не влияет на видимость парка. Если новая версия не стартует,
+     откат мгновенный и без потери наблюдения.
+  2. Экспортёры — вторыми. Каждый экспортёр обслуживает одну машину
+     или один сервис. Обновляем по одному, проверяя up после каждого.
+  3. Prometheus — последним. Он видит всех остальных, поэтому
+     к моменту его обновления парк уже проверен на новых версиях.
+
+Проверка конфигурации делается ДО подмены бинарника: новая версия
+может не принять старую конфигурацию, и узнать об этом лучше
+на проверке, а не при запуске.
+
+  promtool check config /etc/prometheus/prometheus.yml
+  promtool check rules /etc/prometheus/rules/*.rules.yml
+  amtool check-config /etc/alertmanager/alertmanager.yml
+
+Откат делается возвратом прежнего бинарника. Поэтому перед подменой
+сохраняем текущий файл рядом:
+
+  sudo cp /usr/local/bin/prometheus /usr/local/bin/prometheus-3.14.0.bak
+  promtool --version
+  promtool, version 3.14.0 (branch: HEAD, revision: ...)
+
+  cd /home/engineer/distr
+  wget https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.linux-amd64.tar.gz
+  tar xzf prometheus-3.15.0.linux-amd64.tar.gz
+  sudo install -m 0755 prometheus-3.15.0.linux-amd64/prometheus /usr/local/bin/prometheus
+  sudo install -m 0755 prometheus-3.15.0.linux-amd64/promtool /usr/local/bin/promtool
+  sudo systemctl restart prometheus
+  systemctl is-active prometheus
+  active
+
+ВАЖНО: prometheus и promtool обновляются вместе. Если обновить
+только promtool, проверка конфигурации начнёт отвечать за другую
+версию, и «SUCCESS» перестанет что-либо значить.
+
+ЧЕГО НЕ ДЕЛАТЬ: не обновляйте «на живой» без снимка виртуальной
+машины. Откат бинарника спасает от неудачной версии, но не спасает
+от неудачной миграции формата данных: в отличие от бинарника,
+TSDB назад не откатывается.
+
+ИСПРАВЛЕНО: темы обновления в прежней версии курса не было вообще:
+версии просто указывались в командах установки, и вопрос «что делать
+при переходе на новую версию» не поднимался. Про проверку
+конфигурации до подмены бинарника, про порядок «Alertmanager первым»
+и про откат не было сказано ничего: студент узнавал о несовместимой
+конфигурации из журнала уже упавшей службы.
+
+#########################################################################
+ЧАСТЬ 2. ЭКСПЛУАТАЦИЯ: КОД, ДОСТУП, ДЕЖУРНЫЙ
+#########################################################################
+
+=========================================================================
+ШАГ 8. КОНФИГУРАЦИЯ В GIT
+=========================================================================
+
+Конфигурация мониторинга — это код. У неё есть автор, версия,
+история изменений и последствия ошибки. Хранить её в каталоге
+на машине, куда заходят по SSH, — то же самое, что хранить исходники
+только на сервере.
+
+Первое, что нужно решить: что не попадёт в репозиторий. Файл
+.gitignore кладётся в корень каталога конфигурации:
+
+  cd /etc/prometheus
+  sudo tee .gitignore > /dev/null <<'EOF'
+  # Данные: в репозиторий не попадают, это база TSDB.
+  data/
+  wal/
+  chunks_head/
+  *.tmp
+
+  # Секреты: токен бота, пароль SMTP, файл паролей прокси.
+  alertmanager.secret.yml
+  .htpasswd
+  web.secret.yml
+
+  # Резервные копии и архивы.
+  *.tar.gz
+  *.bak
+  restore-check/
+
+  # Локальные файлы редактора.
+  *.swp
+  *~
+  EOF
+
+ПОЧЕМУ ИМЕННО ТАК: в .gitignore перечислено не «всё лишнее»,
+а две категории: данные, которые большие и меняются каждую секунду,
+и секреты, которые нельзя показывать никому. Остальное — конфигурация
+и правила — обязано быть в репозитории, включая файлы тестов: без
+них проверка в конвейере не найдёт, что проверять.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: репозиторий конфигурации отвечает на вопрос
+«что изменилось перед тем, как всё сломалось». В мониторинге этот
+вопрос возникает чаще, чем где-либо: изменения здесь видны
+не сразу, а через сутки, когда правило с новым выражением
+наконец сработает — или не сработает.
+
+=========================================================================
+ШАГ 9. ПРОВЕРКА КОНФИГУРАЦИЙ В КОНВЕЙЕРЕ
+=========================================================================
+
+Все проверки, которые мы делали руками, выполняются автоматически
+на каждом изменении. Файл конвейера лежит в
+files/15_operations/ci/.gitlab-ci.yml, настройки проверки синтаксиса —
+в files/15_operations/ci/.yamllint. Ниже конвейер напечатан целиком.
+
+  # Конвейер проверки конфигураций мониторинга.
+  #
+  # Этот файл — предмет изучения в практике 15, а не готовый решающий
+  # скрипт: он ничего не устанавливает на стенде. Каждая стадия
+  # запускает ровно ту команду, которую студент выполнял руками,
+  # и отличается от ручного запуска только тем, что выполняется
+  # автоматически на каждом изменении в репозитории.
+  #
+  # Бинарники promtool и amtool берутся из архивов тех же версий,
+  # что закреплены в методике курса. Тег latest не используется:
+  # на вопрос «какой версией проверяли» должен быть ответ.
+
+  stages:
+    - validate
+    - lint
+
+  variables:
+    PROMETHEUS_VERSION: "3.15.0"
+    ALERTMANAGER_VERSION: "0.34.1"
+    CONFIG_DIR: "/etc/prometheus"
+    AM_CONFIG_DIR: "/etc/alertmanager"
+
+  # Проверка главного файла конфигурации и всех файлов правил,
+  # на которые он ссылается через rule_files.
+  promtool-check-config:
+    stage: validate
+    image: ubuntu:26.04
+    before_script:
+      - apt-get update -qq
+      - apt-get install -y -qq curl tar
+      - curl -sSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+      - tar xzf "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+      - cp "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/
+    script:
+      # promtool ищет файлы правил относительно того каталога, где
+      # лежит сам prometheus.yml, поэтому запуск идёт из CONFIG_DIR.
+      - cd "$CONFIG_DIR"
+      - promtool check config prometheus.yml
+
+  # Отдельная проверка правил: ловит ошибки в файлах, которые
+  # подключены к Prometheus, но ещё не читались при перезагрузке.
+  promtool-check-rules:
+    stage: validate
+    image: ubuntu:26.04
+    before_script:
+      - apt-get update -qq
+      - apt-get install -y -qq curl tar
+      - curl -sSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+      - tar xzf "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+      - cp "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/
+    script:
+      - cd "$CONFIG_DIR"
+      - promtool check rules rules/*.rules.yml
+
+  # Тесты правил на выдуманных рядах: единственная стадия, которая
+  # проверяет не синтаксис, а смысл — что оповещение срабатывает.
+  promtool-test-rules:
+    stage: validate
+    image: ubuntu:26.04
+    before_script:
+      - apt-get update -qq
+      - apt-get install -y -qq curl tar
+      - curl -sSLO "https://github.com/prometheus/prometheus/releases/download/v${PROMETHEUS_VERSION}/prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+      - tar xzf "prometheus-${PROMETHEUS_VERSION}.linux-amd64.tar.gz"
+      - cp "prometheus-${PROMETHEUS_VERSION}.linux-amd64/promtool" /usr/local/bin/
+    script:
+      - cd "$CONFIG_DIR"
+      - promtool test rules rules/tests/*.test.yml
+
+  # Проверка дерева маршрутов Alertmanager и шаблонов сообщений.
+  # Перезапуск Alertmanager при ошибке в конфигурации оставил бы
+  # дежурного без оповещений вообще.
+  amtool-check-config:
+    stage: validate
+    image: ubuntu:26.04
+    before_script:
+      - apt-get update -qq
+      - apt-get install -y -qq curl tar
+      - curl -sSLO "https://github.com/prometheus/alertmanager/releases/download/v${ALERTMANAGER_VERSION}/alertmanager-${ALERTMANAGER_VERSION}.linux-amd64.tar.gz"
+      - tar xzf "alertmanager-${ALERTMANAGER_VERSION}.linux-amd64.tar.gz"
+      - cp "alertmanager-${ALERTMANAGER_VERSION}.linux-amd64/amtool" /usr/local/bin/
+    script:
+      - cd "$AM_CONFIG_DIR"
+      - amtool check-config alertmanager.yml
+
+  # Синтаксис YAML во всём репозитории: отступы, табы, дубли ключей.
+  # Смысла конфигурации эта стадия не проверяет.
+  yamllint:
+    stage: lint
+    image: python:3.13-slim
+    before_script:
+      - pip install --quiet yamllint==1.35.1
+    script:
+      - yamllint -c ci/.yamllint "$CONFIG_DIR" "$AM_CONFIG_DIR"
+
+Настройки yamllint, на которые ссылается последняя стадия:
+
+  # Настройки yamllint для конфигураций мониторинга.
+  #
+  # Задача этой проверки — синтаксис, а не стиль. Поэтому правила,
+  # которые ловят настоящие поломки (табы, дубли ключей, отступы),
+  # оставлены включёнными, а требования к длине строк ослаблены:
+  # команды и выражения PromQL в правилах переносить вредно.
+
+  extends: default
+
+  rules:
+    line-length:
+      max: 120
+      allow-non-breakable-words: true
+    comments:
+      min-spaces-from-content: 1
+    comments-indentation: disable
+    document-start: disable
+    braces:
+      min-spaces-inside: 0
+      max-spaces-inside: 1
+    brackets:
+      min-spaces-inside: 0
+      max-spaces-inside: 1
+    indentation:
+      spaces: 2
+      indent-sequences: consistent
+    truthy:
+      allowed-values: ["true", "false"]
+
+ПОЧЕМУ ИМЕННО ТАК: бинарники promtool и amtool на каждой стадии
+скачиваются заново, а версия закреплена переменной. Соблазн взять
+образ с готовыми инструментами и тег latest у него велик, но тогда
+на вопрос «какой версией проверяли конфигурацию» ответить нечем.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: конвейер запускается до того, как изменение
+попадёт на машину с мониторингом. Проверка в конвейере стоит
+секунды, проверка на живой системе — минуты простоя без оповещений.
+
+ПРОВЕРКА: прогоним те же стадии руками, без конвейера. Полный
+набор команд и ожидаемый вывод — в шаге 10 практики 16; здесь
+достаточно убедиться, что инструменты на месте и файл конвейера
+разбирается.
+
+  yamllint --version
+  yamllint 1.35.1
+  cd /etc/prometheus && sudo -u prometheus promtool check config prometheus.yml
+  SUCCESS: /etc/prometheus/prometheus.yml is valid prometheus config file
+
+=========================================================================
+ШАГ 10. ЧТО ЛОВИТ КАЖДАЯ СТАДИЯ
+=========================================================================
+
+Первая стадия — promtool check config. Она разбирает главный файл
+и все файлы, на которые он ссылается через rule_files. Ловит
+опечатки в именах ключей, неверные единицы времени, ссылки
+на несуществующие файлы правил и незакрытые кавычки.
+
+Вторая стадия — promtool check rules. Она проверяет только файлы
+правил: наличие expr и record или alert у каждого правила,
+синтаксис выражений PromQL, уникальность имён групп.
+
+Третья стадия — promtool test rules. Единственная стадия, которая
+проверяет смысл: она подаёт выдуманные ряды и сверяет, какие
+оповещения обязаны появиться. Правило, которое истинно всегда,
+проходит первые две стадии и падает только на этой.
+
+Четвёртая стадия — amtool check-config. Разбирает дерево маршрутов
+Alertmanager и шаблоны сообщений. Ошибка в конфигурации Alertmanager
+приводит к тому, что служба не стартует, — а это потеря всех
+оповещений сразу.
+
+Пятая стадия — yamllint. Проверяет синтаксис YAML во всех файлах:
+табуляции вместо пробелов, нарушенные отступы, повторяющиеся ключи.
+Смысла конфигурации она не проверяет и не заменяет promtool.
+
+ПОЧЕМУ ИМЕННО ТАК: стадии идут в порядке возрастания стоимости.
+yamllint дешевле всех, promtool test rules — дороже всех, потому что
+вычисляет выражения на выдуманных рядах. Дешёвые проверки первыми
+дают быстрый ответ на глупую ошибку.
+
+ЧЕГО НЕ ДЕЛАТЬ: не считайте, что конвейер заменяет проверку на
+стенде. Он отвечает на вопрос «конфигурация корректна», а не
+на вопрос «мониторинг работает». Между этими вопросами лежит
+вся практика 15.
+
+=========================================================================
+ШАГ 11. БЕЗОПАСНОСТЬ: ПРОКСИ, BASIC AUTH, TLS
+=========================================================================
+
+Ни Prometheus, ни Alertmanager не имеют встроенной аутентификации.
+Это не упущение разработчиков, а осознанное решение: оба сервиса
+рассчитаны на работу внутри доверенного периметра. Наружу их
+выставляют через обратный прокси.
+
+Создадим файл паролей. Ключ -B задаёт bcrypt:
+
+  sudo apt install -y apache2-utils
+  sudo htpasswd -B -c /etc/nginx/.htpasswd engineer
+  New password:
+  Re-type new password:
+  Adding password for user engineer
+
+  sudo cat /etc/nginx/.htpasswd
+  engineer:$2y$05$Xk9...
+
+ВАЖНО: без ключа -B htpasswd запишет пароль в формате crypt или MD5.
+nginx такой файл примет, а Prometheus с флагом --web.config.file
+откажется: он поддерживает только bcrypt. Ошибка будет выглядеть
+как «неверный пароль», хотя пароль верный.
+
+Теперь TLS. На стенде сертификат самоподписанный:
+
+  sudo mkdir -p /etc/nginx/tls
+  sudo openssl req -x509 -nodes -days 365 -newkey rsa:2048 \
+    -keyout /etc/nginx/tls/mon.key -out /etc/nginx/tls/mon.crt \
+    -subj "/CN=mon.lab"
+
+Файл прокси лежит в files/15_operations/nginx/prometheus.conf.
+Ниже он напечатан целиком: он закрывает basic auth сразу два
+сервиса — Prometheus и Alertmanager — и отдельно описывает,
+какие служебные точки наружу не отдаются вообще.
+
+  # Обратный прокси для веб-интерфейсов мониторинга.
+  #
+  # Файл кладётся в /etc/nginx/conf.d/prometheus.conf на машине mon.
+  # Он закрывает два сервиса сразу: Prometheus на 9090 и Alertmanager
+  # на 9093, у которых своей аутентификации нет вообще.
+  #
+  # Сертификат учебный, самоподписанный. В рабочей среде его заменяют
+  # на выданный центром сертификации, а порт 80 оставляют только
+  # для перенаправления.
+  #
+  # Файл паролей создаётся командой:
+  #   sudo htpasswd -B -c /etc/nginx/.htpasswd engineer
+  # Ключ -B обязателен: без него пароль уйдёт в формате crypt или MD5,
+  # и nginx откажется с ним работать.
+
+  server {
+      listen 443 ssl;
+      server_name mon.lab;
+
+      ssl_certificate     /etc/nginx/tls/mon.crt;
+      ssl_certificate_key /etc/nginx/tls/mon.key;
+      ssl_protocols       TLSv1.2 TLSv1.3;
+
+      auth_basic           "monitoring lab";
+      auth_basic_user_file /etc/nginx/.htpasswd;
+
+      # Prometheus целиком: и веб-интерфейс, и API.
+      location / {
+          proxy_pass http://127.0.0.1:9090;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+      }
+
+      # Служебные точки, которые наружу не нужны.
+      # /-/reload перечитывает конфигурацию, /-/quit останавливает
+      # службу, /api/v1/admin удаляет ряды. Через прокси они закрыты
+      # даже для того, кто прошёл basic auth.
+      location = /-/reload { deny all; }
+      location = /-/quit   { deny all; }
+      location /api/v1/admin/ { deny all; }
+
+      # Метрики самого Prometheus отдаются по отдельному адресу
+      # и без basic auth: их собирает внешний Prometheus-наблюдатель
+      # с web1, и пароль ему передавать нечем.
+      location = /metrics {
+          auth_basic off;
+          allow 10.0.2.11;
+          deny all;
+          proxy_pass http://127.0.0.1:9090/metrics;
+      }
+  }
+
+  # Alertmanager на втором имени того же прокси.
+  server {
+      listen 443 ssl;
+      server_name alertmanager.lab;
+
+      ssl_certificate     /etc/nginx/tls/mon.crt;
+      ssl_certificate_key /etc/nginx/tls/mon.key;
+      ssl_protocols       TLSv1.2 TLSv1.3;
+
+      auth_basic           "monitoring lab";
+      auth_basic_user_file /etc/nginx/.htpasswd;
+
+      location / {
+          proxy_pass http://127.0.0.1:9093;
+          proxy_set_header Host $host;
+          proxy_set_header X-Real-IP $remote_addr;
+      }
+  }
+
+  # Порт 80 — только перенаправление, никакого http наружу.
+  server {
+      listen 80;
+      server_name mon.lab alertmanager.lab;
+      return 301 https://$host$request_uri;
+  }
+
+ПРОВЕРКА: без пароля доступа нет, с паролем есть.
+
+  curl -s -o /dev/null -w '%{http_code}\n' -k https://10.0.2.5/-/ready
+  401
+  curl -s -o /dev/null -w '%{http_code}\n' -k -u engineer:Console47 \
+    https://10.0.2.5/-/ready
+  200
+
+ЗАЧЕМ ЭТО В РАБОТЕ: открытый /api/v1/query наружу — это не только
+чтение метрик. Метрики описывают парк машин точнее любой карты сети:
+имена хостов, версии ядер, открытые порты, имена контейнеров.
+Открытый Alertmanager хуже: через /api/v2/silences любой желающий
+может замолчать оповещения на сутки.
+
+ЧЕГО НЕ ДЕЛАТЬ: не включайте --web.enable-admin-api и
+--web.enable-lifecycle, если порт смотрит наружу. Первый флаг
+разрешает удалять ряды из базы через API, второй позволяет
+перезагрузить конфигурацию и остановить службу POST-запросом.
+Ни то, ни другое не требует подтверждения и не оставляет следа
+в журнале, достаточного для разбора.
+
+=========================================================================
+ШАГ 12. ПРАВА И УЧЁТНЫЕ ЗАПИСИ СЛУЖБ
+=========================================================================
+
+Служба, работающая от root, при компрометации отдаёт всю машину.
+Проверим, от кого работают наши службы:
+
+  ps -o user=,pid=,cmd= -C prometheus
+  prometheus   812 /usr/local/bin/prometheus --config.file=/etc/prometheus/prometheus.yml
+  ps -o user=,pid=,cmd= -C alertmanager
+  prometheus  1024 /usr/local/bin/alertmanager --config.file=/etc/alertmanager/alertmanager.yml
+
+Права на конфигурацию. Конфигурация читается службой, значит
+владелец — prometheus, а группа и остальные не должны иметь
+доступа к файлам с секретами:
+
+  sudo chown -R prometheus:prometheus /etc/prometheus /etc/alertmanager
+  sudo chmod 600 /etc/alertmanager/alertmanager.yml
+  sudo stat -c '%U %G %a %n' /etc/alertmanager/alertmanager.yml
+  prometheus prometheus 600 /etc/alertmanager/alertmanager.yml
+
+ПОЧЕМУ ИМЕННО ТАК: chmod 600 на alertmanager.yml, а не 644, потому
+что внутри токен бота и пароль SMTP. 644 означает «читают все, кто
+вошёл на машину»; на стенде это безразлично, в рабочей среде —
+утечка канала оповещения. Тот же режим ставят на файл паролей
+/etc/nginx/.htpasswd и на web.yml с bcrypt-хешем.
+
+Файл web.yml целиком из files/15_operations/web.yml:
+
+  # Файл веб-конфигурации Prometheus и Alertmanager.
+  #
+  # Подключается флагом в юнит-файле службы:
+  #   --web.config.file=/etc/prometheus/web.yml
+  # у Prometheus и
+  #   --web.config.file=/etc/alertmanager/web.yml
+  # у Alertmanager. Формат у обоих одинаковый.
+  #
+  # Что здесь есть и чего здесь нет.
+  #
+  # ЕСТЬ: basic_auth_users — проверка пароля на самом Prometheus.
+  # НЕТ TLS: шифрование канала и сертификат делает nginx из файла
+  # nginx/prometheus.conf, который стоит перед Prometheus.
+  # Prometheus слушает только localhost (--web.listen-address=
+  # 127.0.0.1:9090), и наружу его порт не смотрит вообще. Ставить
+  # TLS ещё и здесь незачем: между nginx и Prometheus трафик
+  # не покидает машину.
+  #
+  # Если Prometheus слушает не localhost, а сеть, TLS нужен и в этом
+  # файле — блоком tls_server_config с cert_file и key_file.
+  # В курсе выбран вариант с прокси, и это объясняется в практике 15.
+  #
+  # ХЕШ НИЖЕ — УЧЕБНЫЙ. Он соответствует паролю Console47, который
+  # опубликован в методике курса и напечатан в практике открытым
+  # текстом. В рабочей среде хеш в репозиторий не попадает: файл
+  # с ним лежит в секретах и раздаётся системой управления
+  # конфигурацией. Сменить пароль:
+  #   htpasswd -B -C 12 /etc/prometheus/web.yml engineer
+  # Ключ -B задаёт bcrypt, -C 12 — стоимость. Обе величины
+  # в рабочей среде выбирают осознанно: bcrypt считается медленно
+  # намеренно, и стоимость 14 на слабой машине заметна на каждом
+  # запросе.
+
+  basic_auth_users:
+    engineer: $2y$12$i0J3nqLd7YbQyf4WcT8O1uXm5sRkpHvZaE6gN2wMjVtC9dBxSFhqe
+
+ПОЧЕМУ ИМЕННО ТАК: в файле нет блока tls_server_config, и это
+не упущение. Сертификат и шифрование уже сделаны на nginx, а между
+nginx и Prometheus трафик не выходит за пределы машины. Двойной
+TLS здесь только добавил бы точку отказа: истёкший сертификат
+на внутреннем порту ломает мониторинг так же надёжно, как
+на внешнем.
+
+ПРОВЕРКА: после подключения файла Prometheus должен требовать
+пароль даже на localhost:
+
+  curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:9090/-/ready
+  401
+  curl -s -o /dev/null -w '%{http_code}\n' -u engineer:Console47 \
+    http://127.0.0.1:9090/-/ready
+  200
+
+Второй случай — права на файлы. Убедимся, что посторонний не читает
+секрет. Создадим временную учётную запись и попробуем:
+
+  sudo useradd -m testreader
+  sudo -u testreader cat /etc/alertmanager/alertmanager.yml
+  cat: /etc/alertmanager/alertmanager.yml: Permission denied
+  sudo userdel -r testreader
+
+=========================================================================
+ШАГ 13. RUNBOOK: ЧТО ДЕЛАТЬ ДЕЖУРНОМУ
+=========================================================================
+
+Оповещение без инструкции — это половина работы. Дежурный, который
+в три часа ночи читает первое в жизни оповещение, ищет не причину,
+а точку входа.
+
+Runbook — короткий документ, где на каждый симптом есть проверка
+и действие. Образец лежит в files/15_operations/runbook.md и ниже
+напечатан целиком. Каждая запись в нём состоит из четырёх частей:
+
+  * СИМПТОМ — что видит дежурный: текст оповещения или жалоба;
+  * ПРОВЕРКА — команды, которые подтверждают или снимают гипотезу;
+  * ДЕЙСТВИЕ — что делать, если гипотеза подтвердилась;
+  * ЭСКАЛАЦИЯ — когда прекращать разбираться самому и кому звонить.
+
+  Runbook дежурного: мониторинг на Prometheus и Grafana
+
+  Это образец инструкции дежурному, собранный по практикам 1–15 курса.
+  Он отвечает на один вопрос: что делать, когда пришло оповещение.
+
+  Документ намеренно короткий. Runbook, который не читают в три часа
+  ночи, бесполезен: дежурный открывает не «полное руководство»,
+  а список из десяти строк, где по симптому находит проверку
+  и действие.
+
+  Как устроена запись
+
+  Каждая запись состоит из четырёх частей:
+
+  * СИМПТОМ — что видит дежурный: текст оповещения или жалоба.
+  * ПРОВЕРКА — команды, которые подтверждают или снимают гипотезу.
+  * ДЕЙСТВИЕ — что делать, если гипотеза подтвердилась.
+  * ЭСКАЛАЦИЯ — когда прекращать разбираться самому и кому звонить.
+
+  Общие правила дежурного
+
+  * Сначала убедиться, что проблема настоящая. up == 0 означает
+    «Prometheus не смог собрать метрики», а не «машина упала»:
+    это разные утверждения, и проверяются они разными командами.
+  * Не отключать правило, чтобы «перестало звонить». Правило
+    отключают через silence в Alertmanager и с записью причины,
+    а не правкой файла правил на живой системе.
+  * Любое действие записывать: время, что сделано, что изменилось.
+    Без записи через сутки невозможно понять, почему диск снова полон.
+  * Если непонятно, что происходит, — эскалировать раньше, а не позже.
+    Ложная тревога дешевле простоя.
+
+  Записи
+
+  1. InstanceDown: цель недоступна
+
+  СИМПТОМ. Оповещение InstanceDown с меткой instance="10.0.2.13:9100",
+  значение up равно 0.
+
+  ПРОВЕРКА.
+    curl -s http://10.0.2.13:9100/metrics | head
+    ping -c 2 10.0.2.13
+    systemctl status node_exporter
+  Порядок: сначала curl с mon. Если ответ есть — проблема в самом
+  Prometheus (см. запись 2). Если ответа нет — смотреть машину.
+
+  ДЕЙСТВИЕ. Машина отвечает по сети, но экспортёр не отвечает:
+  перезапустить node_exporter на ней, затем проверить up в течение
+  одного интервала сбора. Машина не отвечает вообще: разбираться
+  с машиной, а не с мониторингом.
+
+  ЭСКАЛАЦИЯ. К владельцу машины, если она не отвечает больше 15 минут
+  и это не учебный стенд.
+
+  2. InstanceDown: недоступен сам Prometheus
+
+  СИМПТОМ. Оповещение приходит по внешней проверке с web1, а внутри
+  Prometheus все цели выглядят как недоступные одновременно.
+
+  ПРОВЕРКА.
+    systemctl status prometheus
+    journalctl -u prometheus -n 50 --no-pager
+    curl -s localhost:9090/-/ready
+    du -sh /var/lib/prometheus
+    df -h /var/lib/prometheus
+  Одновременное падение всех целей — почти всегда сам Prometheus,
+  а не десять машин сразу.
+
+  ДЕЙСТВИЕ. Смотреть журнал: ошибка конфигурации, нехватка места,
+  права на каталог данных. Если место кончилось — освободить или
+  уменьшить срок хранения, затем перезапустить службу.
+
+  ЭСКАЛАЦИЯ. К тому, кто отвечает за мониторинг, немедленно: без
+  Prometheus дежурный слеп.
+
+  3. Диск заполняется
+
+  СИМПТОМ. Оповещение DiskWillFillIn4Hours или
+  HostOutOfDiskSpace с меткой instance="10.0.2.13:9100".
+
+  ПРОВЕРКА.
+    df -h
+    du -xh / --max-depth=2 | sort -h | tail -20
+  Порядок: сначала df — понять, какой именно раздел. Потом du —
+  найти, что в нём лежит.
+
+  ДЕЙСТВИЕ. Если это учебный файл из практики 10 — удалить его.
+  Если это логи — настроить ротацию. Если это база данных —
+  эскалировать владельцу сервиса: удаление файлов на живой базе
+  не дежурная операция.
+
+  ЭСКАЛАЦИЯ. Владельцу сервиса, если заполнен раздел с данными,
+  а не с логами.
+
+  4. Правила не вычисляются
+
+  СИМПТОМ. Метрика prometheus_rule_evaluation_failures_total растёт,
+  в веб-интерфейсе на странице Alerts у группы ошибка.
+
+  ПРОВЕРКА.
+    curl -s localhost:9090/api/v1/rules | head -40
+    promtool check rules /etc/prometheus/rules/*.rules.yml
+    journalctl -u prometheus -n 30 --no-pager | grep -i rule
+  ДЕЙСТВИЕ. Исправить правило, проверить promtool check rules,
+  перечитать конфигурацию. Если правило верное, а ошибка осталась, —
+  проверить, не появились ли в выражении ряды с одинаковым набором
+  меток (many-to-many matching not allowed).
+
+  ЭСКАЛАЦИЯ. Не требуется, если оповещения продолжают приходить
+  из других групп.
+
+  5. Конфигурация не перечиталась
+
+  СИМПТОМ. prometheus_config_last_reload_successful равно 0,
+  изменения в конфигурации не применились.
+
+  ПРОВЕРКА.
+    promtool check config /etc/prometheus/prometheus.yml
+    tail -20 /var/log/syslog | grep -i prometheus
+  ДЕЙСТВИЕ. Откатить последнее изменение конфигурации, проверить
+  её promtool, применить снова. Помнить: неудачная перезагрузка
+  не ломает работающий Prometheus — он продолжает работать
+  со старой конфигурацией.
+
+  ЭСКАЛАЦИЯ. Не требуется.
+
+  6. Оповещения не доставляются
+
+  СИМПТОМ. Оповещение в состоянии Firing в Prometheus, но ни письма,
+  ни сообщения нет.
+
+  ПРОВЕРКА.
+    amtool alert query --alertmanager.url=http://localhost:9093
+    curl -s 'http://localhost:9093/api/v2/status' | head -20
+    journalctl -u alertmanager -n 50 --no-pager | grep -i notify
+  Порядок: есть ли оповещение в Alertmanager (если нет — связь
+  Prometheus с Alertmanager), есть ли группа, была ли попытка
+  отправки и чем она закончилась.
+
+  ДЕЙСТВИЕ. Ошибка отправки — к получателю: доступность SMTP, верный
+  токен бота, адрес вебхука. Если в логах notify attempt failed,
+  текст ошибки называет причину точнее любой догадки.
+
+  ЭСКАЛАЦИЯ. Если оповещения не доходят вообще — немедленно, это
+  потеря канала.
+
+  7. Оповещений нет вообще, хотя всё работает
+
+  СИМПТОМ. Тишина. Ни одного оповещения за сутки.
+
+  ПРОВЕРКА.
+    curl -s 'localhost:9090/api/v1/query?query=ALERTS' | head -20
+    curl -s 'localhost:9090/api/v1/query?query=ALERTS_FOR_STATE' | head -5
+    curl -s 'localhost:9090/api/v1/query?query=up' | head -5
+  Тишина — тоже сигнал. Проверяется правилом-«сторожевым псом»:
+  оно горит постоянно, и его отсутствие означает, что канал
+  оповещения сломан.
+
+  ДЕЙСТВИЕ. Если сторожевой пёс молчит, разбираться с каналом:
+  Prometheus, Alertmanager, получатель. Если горит, но других
+  оповещений нет, — проверить, что правила подключены в rule_files.
+
+  ЭСКАЛАЦИЯ. К владельцу мониторинга, если причина не найдена
+  за 15 минут.
+
+  8. Grafana не открывается или не показывает данные
+
+  СИМПТОМ. Страница не открывается, либо панели пусты.
+
+  ПРОВЕРКА.
+    systemctl status grafana-server
+    curl -s -o /dev/null -w '%{http_code}\n' http://localhost:3000/login
+    curl -s http://10.0.2.5:9090/api/v1/query?query=up | head -5
+    journalctl -u grafana-server -n 30 --no-pager
+  Порядок: жива ли служба, отвечает ли источник данных, есть ли
+  данные в самом Prometheus. Пустые панели при живом Prometheus —
+  это почти всегда диапазон времени или неверный запрос, а не отказ.
+
+  ДЕЙСТВИЕ. Проверить источник данных в Grafana кнопкой Save & test,
+  сверить запрос панели с запросом в веб-интерфейсе Prometheus.
+  Расхождение в запросе видно сразу.
+
+  ЭСКАЛАЦИЯ. Не требуется: Grafana не влияет на сбор и оповещения.
+
+  9. Сертификат истекает
+
+  СИМПТОМ. Оповещение по probe_ssl_earliest_cert_expiry — до
+  истечения меньше 14 дней.
+
+  ПРОВЕРКА.
+    echo | openssl s_client -connect 10.0.2.11:443 -servername web1 2>/dev/null | openssl x509 -noout -dates
+    curl -s 'localhost:9090/api/v1/query?query=probe_ssl_earliest_cert_expiry'
+  ДЕЙСТВИЕ. Перевыпустить сертификат. На стенде сертификат
+  самоподписанный, поэтому перевыпуск — это одна команда openssl;
+  в рабочей среде это заявка в центр сертификации, и её подают
+  заранее именно для того, чтобы 14 дней были сроком на подумать.
+
+  ЭСКАЛАЦИЯ. К владельцу сервиса, если сертификат выписан не вами.
+
+  10. Нехватка памяти на машине мониторинга
+
+  СИМПТОМ. Оповещение HostOutOfMemory на mon, Prometheus
+  перезапускается, запросы выполняются медленно.
+
+  ПРОВЕРКА.
+    free -h
+    curl -s 'localhost:9090/api/v1/query?query=prometheus_tsdb_head_series'
+    journalctl -u prometheus -n 30 --no-pager | grep -i memory
+    top -b -n 1 | head -15
+  Порядок: сначала измерить кардинальность — число рядов в голове
+  TSDB. Рост числа рядов объясняет рост памяти лучше всего.
+
+  ДЕЙСТВИЕ. Убрать виновника: метку с высоким разнообразием
+  в высокочастотной метрике, лишние задания, лишние правила записи.
+  Понижение срока хранения даёт мало: память
+  занимает голова TSDB, а не старые блоки.
+
+  ЭСКАЛАЦИЯ. К владельцу того сервиса, чей экспортёр дал рост рядов.
+
+  11. Запрос в Grafana выполняется слишком долго
+
+  СИМПТОМ. Панель отвечает Gateway Timeout или грузится минутами.
+
+  ПРОВЕРКА.
+    curl -s 'localhost:9090/api/v1/query?query=prometheus_tsdb_head_series'
+    curl -s 'localhost:9090/api/v1/query?query=count(count by (__name__)({__name__=~".+"}))'
+  ДЕЙСТВИЕ. Уменьшить диапазон, добавить агрегацию, заменить сырые
+  ряды правилом записи. Запрос «за 30 дней без агрегации» на боевом
+  Prometheus не выполняется никогда — это не поломка, а свойство
+  локального хранилища.
+
+  ЭСКАЛАЦИЯ. Не требуется.
+
+ПОЧЕМУ ИМЕННО ТАК: четыре части, а не три. Без эскалации дежурный
+разбирается до утра с тем, что решается звонком владельцу сервиса,
+а причина простоя в отчёте звучит как «дежурный не догадался».
+
+ЗАЧЕМ ЭТО В РАБОТЕ: runbook пишется не для того, чтобы им
+пользовались всегда, а для того, чтобы им можно было пользоваться
+в первый раз. Каждая запись в нём появляется после настоящего
+инцидента, а не до него.
+
+=========================================================================
+ШАГ 14. РАЗБОР ИНЦИДЕНТА: ДИСК ЗАПОЛНЕН, ОПОВЕЩЕНИЯ НЕ БЫЛО
+=========================================================================
+
+Соберём то, ради чего была вся практика. На app1 заполнен корневой
+раздел, правило DiskWillFillIn4Hours должно было сработать,
+но оповещение не пришло. Разберём это по порядку.
+
+Симптом: на app1 нет места, службы пишут ошибки, дежурный узнал
+о проблеме от коллеги.
+
+Причина первая: правило вообще не вычислялось. Файл правил
+не подключён в rule_files, или в выражении ошибка. Проверка:
+
+  curl -s 'localhost:9090/api/v1/rules' | grep -c 'DiskWillFillIn4Hours'
+  0
+
+Ноль означает, что правила с таким именем в Prometheus нет:
+оно не подключено или лежит в файле, который не читается. Вторая
+проверка — растёт ли счётчик ошибок вычисления:
+
+  curl -s 'localhost:9090/api/v1/query?query=increase(prometheus_rule_evaluation_failures_total[1h])'
+
+Причина вторая: правило вычислялось, но условие не стало истинным.
+Самая частая причина — predict_linear на ровном графике: если диск
+заполнялся ступенькой, а не постепенно, линейное предсказание
+по последнему часу даёт бессмысленный результат. Вторая причина
+внутри этой же: порог правила выше фактического заполнения.
+Проверка:
+
+  curl -s 'localhost:9090/api/v1/query?query=instance:node_filesystem_used:ratio{instance="10.0.2.13:9100"}'
+  curl -s 'localhost:9090/api/v1/query?query=ALERTS{alertname="DiskWillFillIn4Hours"}'
+
+Первый запрос показывает фактическую занятость, второй — состояние
+правила. Если правило в Pending и не переходит в Firing, дело
+во времени for относительно интервала вычисления.
+
+Причина третья: правило сработало, но оповещение не дошло.
+Оно в Firing, а у дежурного тишина. Проверка идёт по цепочке
+справа налево:
+
+  curl -s 'localhost:9090/api/v1/alerts' | grep -c DiskWillFillIn4Hours
+  amtool alert query --alertmanager.url=http://localhost:9093
+  journalctl -u alertmanager -n 50 --no-pager | grep -i notify
+
+Первый запрос — знает ли Prometheus о своём оповещении. Второй —
+дошло ли оно до Alertmanager. Третий — была ли попытка отправки
+и чем она закончилась.
+
+ПОРЯДОК РАЗБОРА ОБЯЗАТЕЛЕН: от Prometheus к получателю, а не
+наоборот. Проверка «а не в спаме ли письмо» уместна последней,
+а не первой: она уводит от причины на несколько шагов.
+
+ЗАЧЕМ ЭТО В РАБОТЕ: эти три причины покрывают большинство случаев
+«оповещение не пришло», независимо от того, о чём оно было.
+Разница только в именах метрик и правил.
+
+=========================================================================
+ШАГ 15. УБОРКА И ИТОГ
+=========================================================================
+
+Уберём за собой то, что создали для проверок:
+
+  rm -f /home/engineer/monitoring-config-*.tar.gz
+  rm -rf /home/engineer/restore-check
+  sudo rm -f /etc/nginx/conf.d/prometheus.conf
+  sudo systemctl reload nginx
+
+Прокси и файл паролей мы убираем потому, что дальше в курсе веб-
+интерфейсы нужны открытыми: в практике 16 к ним обращается Grafana.
+Учётная запись prometheus, права 600 на alertmanager.yml и правило
+Watchdog остаются: это часть рабочей конфигурации, а не проверка.
+
+=========================================================================
+ЕСЛИ ЧТО-ТО ПОШЛО НЕ ТАК
+=========================================================================
+
+ПРОБЛЕМА: promtool check config не находит файл правил
+
+  FAILED: parsing YAML file /etc/prometheus/prometheus.yml: rule_files: stat rules/lab.rules.yml: no such file or directory
+
+Файл правил указан относительным путём, а promtool ищет его
+относительно текущего каталога, а не относительно prometheus.yml.
+Prometheus при этом ищет относительно каталога конфигурации, поэтому
+служба работает, а проверка падает — и это худший вид расхождения:
+непонятно, кому верить. Проверяйте:
+
+  1. Как записан путь в rule_files: он должен начинаться со слеша.
+  2. Откуда запущен promtool:
+
+     cd /etc/prometheus && promtool check config prometheus.yml
+
+  3. Существует ли файл: ls -l /etc/prometheus/rules/.
+
+ПОЧЕМУ ИМЕННО ТАК: у Prometheus и promtool разные рабочие каталоги
+при одном и том же флаге --config.file. Абсолютный путь убирает
+это расхождение целиком, и потому в итоговой конфигурации практики
+16 записаны только абсолютные пути.
+
+ПРОБЛЕМА: amtool check-config падает на отсутствующем шаблоне
+
+  level=error msg="Loading configuration file failed" err="template: lab.tmpl: no such file or directory"
+
+В alertmanager.yml есть секция templates, а файла нет: он не попал
+в резервную копию или не восстановился. Проверяйте:
+
+  1. Что записано в templates и что лежит на диске:
+
+     grep -A3 '^templates:' /etc/alertmanager/alertmanager.yml
+     ls -l /etc/alertmanager/templates/
+
+  2. Права: файл шаблона читает служба от prometheus.
+  3. Что шаблон синтаксически верен: amtool проверяет и его тоже.
+
+ИСПРАВЛЕНО: в прежней версии курса шаблоны сообщений Alertmanager
+не разбирались, поэтому и вопроса «попадёт ли каталог templates
+в копию» не возникало. Здесь он разобран потому, что после
+восстановления Alertmanager без шаблонов не стартует: секция
+templates остаётся в конфигурации, а файлов на диске нет.
+
+ПРОБЛЕМА: nginx не принимает директиву auth_basic
+
+  nginx: [emerg] unknown directive "auth_basic" in /etc/nginx/conf.d/prometheus.conf:26
+
+Директива auth_basic относится к модулю ngx_http_auth_basic_module.
+В сборке из репозитория Ubuntu он есть, но бывают сборки без него.
+Проверяйте:
+
+  1. Собран ли модуль:
+
+     nginx -V 2>&1 | tr ' ' '\n' | grep auth_basic
+
+  2. Ошибку в самом файле: лишняя фигурная скобка выше по тексту
+     даёт ту же форму сообщения. Проверьте nginx -t после отката
+     файла к предыдущей версии.
+  3. Для TLS понадобится ещё модуль ngx_http_ssl_module —
+     он проверяется той же командой.
+
+ПРОБЛЕМА: прокси отдаёт 502 Bad Gateway
+
+  502 Bad Gateway при открытии https://10.0.2.5/
+
+Прокси работает, а служба за ним — нет: nginx не смог соединиться
+с 127.0.0.1:9090. Проверяйте по порядку:
+
+  1. Жива ли служба:
+
+     systemctl is-active prometheus
+
+  2. На каком адресе она слушает:
+
+     ss -ltnp | grep 9090
+
+     Если в выводе 127.0.0.1:9090 или :9090, дело не в адресе.
+     Если порта нет вообще — служба не стартовала.
+  3. Что говорит журнал:
+
+     journalctl -u prometheus -n 30 --no-pager
+
+ПРОБЛЕМА: после восстановления из копии Prometheus не стартует
+
+  level=error msg="Error opening storage" err="open /var/lib/prometheus/lock: permission denied"
+
+Каталог данных принадлежит не той учётной записи: при восстановлении
+каталоги создавались от root, и prometheus не может писать в них.
+Проверяйте:
+
+  1. Владельца и права каталога данных:
+
+     stat -c '%U %G %a %n' /var/lib/prometheus
+
+     Ожидается prometheus prometheus 755.
+  2. Созданы ли учётные записи служб: useradd в архив не попадает,
+     и после восстановления на чистой машине их может не быть.
+  3. Свободное место: при полном диске сообщение об ошибке бывает
+     другим, но выглядит так же устрашающе.
+
+ПОЧЕМУ ИМЕННО ТАК: девяносто процентов отказов «служба не стартует»
+после восстановления — это права на каталог данных, а не ошибка
+в конфигурации. Начинать разбор с прав дешевле, чем с чтения
+конфигурации.
+
+ПРОБЛЕМА: Watchdog не приходит, хотя правило в Firing
+
+  Оповещение Watchdog видно в веб-интерфейсе Prometheus, но
+  получателю не приходит ничего.
+
+Правило работает, сломана цепочка доставки. Проверяйте:
+
+  1. Дошло ли оповещение до Alertmanager:
+
+     amtool alert query --alertmanager.url=http://localhost:9093
+
+     Пусто — проблема в секции alerting файла prometheus.yml.
+  2. Есть ли маршрут для метки severity=info. В практике 9
+     маршруты строились по critical и warning, и info мог
+     остаться без получателя.
+  3. Что говорит журнал Alertmanager про попытку отправки:
+
+     journalctl -u alertmanager -n 50 --no-pager | grep -i notify
+
+Молчание Watchdog — это и есть сигнал, ради которого он заведён.
+
+=========================================================================
+ПРОВЕРКА РЕЗУЛЬТАТА
+=========================================================================
+
+Работа сделана, если выполняются все пункты.
+
+1. Метрики мониторинга собираются и не показывают отказов:
+
+     curl -s 'http://10.0.2.5:9090/api/v1/query?query=prometheus_config_last_reload_successful'
+     "value":[1715000000,"1"]
+     curl -s 'http://10.0.2.5:9090/api/v1/query?query=increase(prometheus_rule_evaluation_failures_total[1h])'
+     пустой результат
+
+2. Правила мониторинга подключены, и Watchdog в состоянии Firing:
+
+     curl -s 'http://10.0.2.5:9090/api/v1/rules' | grep -c 'lab.watchdog'
+     1
+     curl -s 'http://10.0.2.5:9090/api/v1/query?query=ALERTS{alertname="Watchdog"}'
+     "value":[1715000000,"1"]
+
+3. Внешняя проверка с web1 проходит и видит мониторинг:
+
+     ssh engineer@10.0.2.11 "curl -s 'http://localhost:9115/probe?target=10.0.2.5:9090&module=tcp_connect' | grep ^probe_success"
+     probe_success 1
+
+4. Архив конфигурации создан, имеет права 600 и распаковывается
+   в отдельный каталог:
+
+     sudo stat -c '%a %n' /home/engineer/monitoring-config-*.tar.gz
+     600 /home/engineer/monitoring-config-2026-05-14.tar.gz
+     tar tzf /home/engineer/monitoring-config-*.tar.gz | grep -c 'etc/prometheus'
+
+5. Восстановленная из копии конфигурация проходит проверку
+   и запускается на свободном порту:
+
+     cd /home/engineer/restore-check/etc/prometheus
+     promtool check config prometheus.yml
+     SUCCESS: ... is valid prometheus config file
+
+6. Конфигурация лежит в git, и в неё не попали данные и секреты:
+
+     cd /etc/prometheus && sudo git status --short
+     git status --ignored --short | grep -E 'data/|alertmanager.secret.yml'
+
+7. Конвейер проверок проходит целиком: пять стадий из
+   files/15_operations/ci/.gitlab-ci.yml отвечают SUCCESS.
+
+8. Веб-интерфейс закрыт паролем и отдаётся по TLS:
+
+     curl -s -o /dev/null -w '%{http_code}\n' -k https://10.0.2.5/-/ready
+     401
+     curl -s -o /dev/null -w '%{http_code}\n' -k -u engineer:Console47 https://10.0.2.5/-/ready
+     200
+
+9. Права на файл с секретом выставлены, службы работают
+   от учётной записи prometheus:
+
+     sudo stat -c '%U %a %n' /etc/alertmanager/alertmanager.yml
+     prometheus 600 /etc/alertmanager/alertmanager.yml
+     ps -o user= -C prometheus -C alertmanager
+
+10. Runbook описывает не меньше восьми симптомов и лежит там,
+    где его найдёт дежурный:
+
+     grep -c '^###' files/15_operations/runbook.md
+     11
+
+11. Инцидент разобран по трём причинам, и для каждой назван
+    порядок проверки — это шаг 14 и ваш конспект.
+
+=========================================================================
+ЧТО ДАЛЬШЕ
+=========================================================================
+
+Далее в курсе:
+
+  * практика 16 — итоговая работа трека «5 дней»: собирает
+    в один стенд обнаружение целей из файлов, правила с тестами,
+    маршрутизацию и провижининг Grafana, а порядок проверки
+    конфигураций берёт из этой практики;
+  * практика 11 — обнаружение целей: объясняет, почему список
+    целей переезжает из конфигурации в файл, и это же правило
+    применяется к конфигурации мониторинга в git;
+  * практика 9 — Alertmanager: в этой практике мы опирались
+    на маршруты и на amtool check-config, разобранные там;
+  * практика 14 — масштаб и хранение: remote_write, который
+    упоминается здесь как замена копии TSDB.
+
+ПЕРЕД ПЕРЕХОДОМ уберите за собой то, что создавали для проверок:
+
+  rm -f /home/engineer/monitoring-config-*.tar.gz
+  rm -rf /home/engineer/restore-check
+  sudo rm -f /etc/nginx/conf.d/prometheus.conf
+  sudo systemctl reload nginx
+
+Оставьте как есть: правило Watchdog, файл watchdog.rules.yml, учётную
+запись prometheus и права 600 на alertmanager.yml. Это рабочая
+конфигурация, и практика 16 опирается на неё.
+
+Убирать нечего, если вы работали на отдельном снимке стенда:
+тогда снимите снимок заново и продолжайте с него.

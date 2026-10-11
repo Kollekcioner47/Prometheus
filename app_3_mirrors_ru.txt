@@ -1,0 +1,396 @@
+ПРИЛОЖЕНИЕ 3. ЗЕРКАЛА И УСТАНОВКА В РОССИИ
+=========================================================================
+
+Это приложение к практике 5 и к любой практике, где что-то
+скачивается. Здесь собрано то, что приходится выяснять опытным
+путём: какие адреса из российских сетей не работают, где взять
+то же самое и как убедиться, что взято именно то, что нужно.
+
+Приложение не заменяет практику 5: там установка Grafana разобрана
+по шагам с объяснениями. Здесь — сводка и справка.
+
+
+ЧАСТЬ 1. ЧТО ИМЕННО НЕ РАБОТАЕТ
+=========================================================================
+
+РЕЧЬ ИДЁТ О GRAFANA LABS
+=========================================================================
+
+Grafana Labs закрыла обслуживание российских адресов. Не работают
+четыре хоста:
+
+  grafana.com              сайт и страница загрузки
+  dl.grafana.com           прямая загрузка .deb и .rpm
+  packages.grafana.com     apt- и yum-репозитории (старый адрес)
+  apt.grafana.com          apt-репозиторий (новый адрес)
+
+Что видит студент, выполняя инструкцию из документации:
+
+    $ curl -I https://dl.grafana.com
+    curl: (6) Could not resolve host: dl.grafana.com
+
+    $ curl -I https://packages.grafana.com
+    curl: (7) Failed to connect to packages.grafana.com port 443: Connection timed out
+
+    $ sudo wget https://dl.grafana.com/oss/release/grafana_12.0.10_amd64.deb
+    wget: unable to resolve host address 'dl.grafana.com'
+
+А при попытке подключить репозиторий:
+
+    Err:1 https://apt.grafana.com stable InRelease
+      Could not connect to apt.grafana.com:443 (35.190.84.23). - connect (111: Connection refused)
+
+ЧТО ЭТО ЗНАЧИТ
+=========================================================================
+
+Симптомы разные, и они вводят в заблуждение.
+
+  * «Could not resolve host» выглядит как проблема DNS. Это не DNS:
+    имя не разрешается на стороне сервиса, потому что зона отдаётся
+    выборочно. Проверить просто: с той же машины getent hosts
+    github.com отвечает, а getent hosts dl.grafana.com — нет.
+  * «Connection timed out» выглядит как проблема сети или
+    брандмауэра. Тоже нет: остальные хосты интернета доступны,
+    не отвечает конкретно этот.
+  * «Connection refused» на конкретный IP выглядит как упавший
+    сервер. На самом деле адрес разрешается, но соединение
+    не принимается для вашего источника.
+
+ВАЖНО: единственный правильный вывод из этих трёх сообщений —
+«официальный хост недоступен, нужен другой источник». Попытки
+«починить DNS», «добавить маршрут» или «отключить брандмауэр»
+на этом стенде ни к чему не приведут и на занятии отнимают время.
+
+КАК ПРОВЕРИТЬ СИТУАЦИЮ ЗА ОДНУ КОМАНДУ
+=========================================================================
+
+    for h in grafana.com dl.grafana.com packages.grafana.com apt.grafana.com mirror.yandex.ru github.com; do
+      printf '%-28s ' "$h"
+      getent hosts "$h" > /dev/null 2>&1 && echo OK || echo FAIL
+    done
+
+Ожидаемый результат на российской сети: первые четыре хоста FAIL,
+mirror.yandex.ru и github.com — OK. Именно так.
+
+ЧЕГО ДЕЛАТЬ НЕ СЛЕДУЕТ
+=========================================================================
+
+  * искать «сборку Grafana» в случайном телеграм-канале, на файловом
+    хостинге или в чужом репозитории. Grafana получает доступ
+    к вашей базе метрик и к другим источникам данных. Пакет
+    из непроверенного источника — это отданный незнакомцу доступ
+    к мониторингу всей организации;
+  * ставить репозиторий с параметром trusted=yes и «забыть» его
+    там. Этот параметр отключает проверку подписи полностью;
+  * использовать тег latest в docker pull и в docker-compose.yml:
+    вы не сможете ответить на вопрос, какая версия у вас работает;
+  * отключать проверку TLS, чтобы «дотянуться» до официального
+    адреса. Если хост не отвечает, отключение проверки сертификата
+    не поможет: соединение не устанавливается до TLS.
+
+
+ЧАСТЬ 2. ЗЕРКАЛО ЯНДЕКСА ДЛЯ GRAFANA
+=========================================================================
+
+АДРЕС
+=========================================================================
+
+    https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb
+
+Это apt-репозиторий Grafana OSS. Структура — обычная для Debian:
+
+    dists/stable/Release          индекс репозитория, подписанный
+                                  ключом Grafana Labs
+    dists/stable/main/...         списки пакетов
+    pool/main/g/grafana/          сами пакеты .deb
+    project/trace/                служебные метки синхронизации
+
+ПОЧЕМУ ЭТО НЕ «ЧУЖАЯ СБОРКА»
+=========================================================================
+
+Три проверки, и все три стоит выполнить на занятии.
+
+1. Сравните имена файлов. Официальный пакет называется
+
+    grafana_12.0.10_21942624936_linux_amd64.deb
+
+и на зеркале он называется ровно так же, включая номер сборки
+21942624936. Пересобранный кем-то пакет имел бы другой номер
+сборки или другое имя.
+
+    curl -s https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/ | grep 'grafana_12.0.10_'
+
+2. Посмотрите на выпуски с исправлениями безопасности. На зеркале
+   рядом лежат файлы вида
+
+    grafana_11.6.14+security-04_25365978681_linux_amd64.deb
+
+Это официальные выпуски Grafana Labs с пометкой security, и они
+появляются на зеркале в те же дни, что и на сайте. Так выглядит
+обычная синхронизация, а не разовая выкладка.
+
+3. Проверьте индекс репозитория. Поле Origin в нём — Grafana Labs,
+а индекс подписан их ключом:
+
+    curl -s https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/dists/stable/Release | head -20
+
+ПОЧЕМУ ЗЕРКАЛО — НОРМАЛЬНАЯ ПРАКТИКА, А НЕ КОСТЫЛЬ
+=========================================================================
+
+Зеркала репозиториев держат почти все крупные организации: это
+снижает нагрузку на внешний канал, ускоряет установку и позволяет
+ставить пакеты на машины без доступа в интернет. Яндекс, кроме
+Grafana, зеркалирует ещё десятки проектов, и часть из них
+пригодится в соседних курсах:
+
+    /mirrors/packages.grafana.com/   Grafana OSS
+    /mirrors/download.docker.com/    репозиторий Docker Engine
+    /mirrors/docker/                 пакеты Docker
+    /mirrors/dl.k8s.io/              бинарники Kubernetes
+    /mirrors/pkgs.k8s.io/            репозиторий Kubernetes
+    /mirrors/packages.gitlab.com/    GitLab
+    /mirrors/releases.hashicorp.com/ Terraform, Vault, Consul
+    /mirrors/ansible-galaxy/         коллекции Ansible
+    /mirrors/postgresql/             PostgreSQL
+    /mirrors/nginx/                  (проверьте наличие перед
+                                     занятием: состав зеркал
+                                     меняется)
+
+Полный список всегда доступен по адресу
+https://mirror.yandex.ru/mirrors/
+
+
+ЧАСТЬ 3. УСТАНОВКА GRAFANA: СПОСОБ 1, ПАКЕТ ИЗ POOL
+=========================================================================
+
+Основной способ курса. Ключ подписи репозитория не нужен вообще.
+
+    cd ~/distr
+
+    curl -s https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/ \
+      | grep -o 'grafana_12\.0\.10_[0-9]*_linux_amd64\.deb' | head -1
+
+    wget https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/pool/main/g/grafana/grafana_12.0.10_21942624936_linux_amd64.deb
+
+    sudo apt install -y ./grafana_12.0.10_21942624936_linux_amd64.deb
+
+    grafana-server -v
+    systemctl status grafana-server --no-pager
+
+ПОЧЕМУ APT, А НЕ DPKG. У команды dpkg -i есть неприятное свойство:
+она ставит пакет, но не умеет доставлять зависимости. Если Grafana
+требует libfontconfig1 или adduser, dpkg сообщит
+
+    dpkg: dependency problems prevent configuration of grafana
+
+и оставит пакет в полунастроенном состоянии. Команда apt install
+с путём к файлу ставит тот же пакет и сама берёт зависимости
+из репозиториев Ubuntu.
+
+ЧТО ДЕЛАТЬ, ЕСЛИ ИМЯ ФАЙЛА ДРУГОЕ. Номер сборки после версии может
+измениться: пакет пересобирают, не меняя версию. Поэтому имя всегда
+берут из листинга каталога, а не набирают по памяти. Это не ошибка
+курса, а свойство репозитория.
+
+
+ЧАСТЬ 4. УСТАНОВКА GRAFANA: СПОСОБ 2, РЕПОЗИТОРИЙ ЗЕРКАЛА
+=========================================================================
+
+Так делают в рабочей среде: репозиторий подключается один раз,
+дальше пакеты обновляются вместе с остальными пакетами системы.
+
+    sudo tee /etc/apt/sources.list.d/grafana.list > /dev/null <<'EOF'
+    deb [signed-by=/etc/apt/keyrings/grafana.gpg] https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb stable main
+    EOF
+
+    sudo apt update
+    sudo apt install -y grafana
+
+Здесь появляется проблема, о которой в инструкциях не пишут:
+apt должен знать публичный ключ Grafana Labs, а ключ лежит
+на недоступном хосте apt.grafana.com. На зеркале файла с ключом
+нет:
+
+    curl -s -o /dev/null -w '%{http_code}\n' \
+      https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb/gpg.key
+
+Ответ 404. Значит, ключ надо взять откуда-то ещё.
+
+ВАРИАНТ А — ПРИНЕСТИ КЛЮЧ ФАЙЛОМ ЗАРАНЕЕ (правильный)
+=========================================================================
+
+На машине, у которой есть доступ к интернету без ограничений:
+
+    curl -fsSL https://apt.grafana.com/gpg.key -o grafana.gpg.key
+    head -1 grafana.gpg.key
+
+Первая строка должна начинаться с
+-----BEGIN PGP PUBLIC KEY BLOCK-----
+
+Перенесите файл на машину mon и установите ключ:
+
+    sudo mkdir -p /etc/apt/keyrings
+    sudo gpg --dearmor -o /etc/apt/keyrings/grafana.gpg < grafana.gpg.key
+    sudo chmod 644 /etc/apt/keyrings/grafana.gpg
+    sudo apt update
+
+Команды целиком — в файле files/05_grafana/key_import.txt.
+
+ВАРИАНТ Б — ИЗВЛЕЧЬ КЛЮЧ ИЗ ПАКЕТА
+=========================================================================
+
+Пакет, скачанный способом 1, подписан тем же ключом, и ключ можно
+достать из служебных данных пакета:
+
+    dpkg-deb -e grafana_12.0.10_21942624936_linux_amd64.deb /tmp/grafana-deb
+    ls /tmp/grafana-deb
+
+Способ рабочий, но неудобный: он требует сначала скачать пакет
+руками, то есть возвращает нас к способу 1.
+
+ВАРИАНТ В — [trusted=yes] (ТОЛЬКО ДЛЯ УЧЕБНОГО СТЕНДА)
+=========================================================================
+
+    sudo tee /etc/apt/sources.list.d/grafana.list > /dev/null <<'EOF'
+    deb [trusted=yes] https://mirror.yandex.ru/mirrors/packages.grafana.com/oss/deb stable main
+    EOF
+    sudo apt update
+
+ЧЕГО НЕ ДЕЛАТЬ: не оставляйте trusted=yes на боевой машине
+и не забудьте его убрать после занятия. Этот параметр отключает
+проверку подписи репозитория полностью: любой, кто сможет подменить
+ответ зеркала или DNS-запись, поставит на вашу машину произвольный
+пакет, и apt об этом не сообщит.
+
+ВАРИАНТ Г — СВОЁ ЗЕРКАЛО ВНУТРИ ОРГАНИЗАЦИИ
+=========================================================================
+
+В рабочей среде чаще всего делают так: зеркало синхронизируют
+во внутреннюю сеть (apt-mirror, aptly, Nexus, Artifactory),
+подписывают своим ключом и раздают машинам. Тогда ни один сервер
+не ходит во внешний интернет за пакетами, а ключ находится
+во внутренней инфраструктуре и доступен всегда. Это разбирается
+в курсе про Nexus и репозитории, а не здесь.
+
+
+ЧАСТЬ 5. PROMETHEUS, ALERTMANAGER И ЭКСПОРТЁРЫ
+=========================================================================
+
+Эти компоненты зеркало не требуется: они распространяются архивами
+на GitHub Releases, а GitHub из России доступен.
+
+Общий вид адреса — имя проекта, тег версии, имя файла:
+
+    https://github.com/prometheus/prometheus/releases/download/v3.15.0/prometheus-3.15.0.linux-amd64.tar.gz
+    https://github.com/prometheus/alertmanager/releases/download/v0.34.1/alertmanager-0.34.1.linux-amd64.tar.gz
+    https://github.com/prometheus/node_exporter/releases/download/v1.12.1/node_exporter-1.12.1.linux-amd64.tar.gz
+    https://github.com/prometheus/blackbox_exporter/releases/download/v0.29.0/blackbox_exporter-0.29.0.linux-amd64.tar.gz
+    https://github.com/prometheus/pushgateway/releases/download/v1.11.4/pushgateway-1.11.4.linux-amd64.tar.gz
+
+ПРОВЕРКА ЦЕЛОСТНОСТИ
+=========================================================================
+
+У каждого релиза на GitHub есть файл sha256sums.txt. Проверить
+скачанное — не формальность, а единственный способ убедиться,
+что архив не побился при загрузке:
+
+    wget https://github.com/prometheus/prometheus/releases/download/v3.15.0/sha256sums.txt
+    sha256sum -c --ignore-missing sha256sums.txt
+
+ЧЕГО НЕ ДЕЛАТЬ: не используйте в адресах звёздочку
+(prometheus-*.tar.gz) и слово latest. В URL звёздочка не
+раскрывается оболочкой, а latest не даёт понять, что вы скачали.
+
+
+ЧАСТЬ 6. КОНТЕЙНЕРЫ, KUBERNETES, GITLAB
+=========================================================================
+
+  * DOCKER ENGINE. Зеркало: https://mirror.yandex.ru/mirrors/download.docker.com/
+    Для практики 7 достаточно репозитория Ubuntu (пакет
+    docker.io) или официального репозитория Docker; при недоступности
+    download.docker.com берётся зеркало.
+  * ОБРАЗЫ КОНТЕЙНЕРОВ. Реестр Docker Hub из России работает
+    нестабильно. Два выхода: заранее загрузить нужные образы
+    и хранить их в локальном реестре (Nexus, Harbor) либо
+    использовать доступное зеркало образов. В практике 7 образы
+    (nginx, redis, cAdvisor) лучше принести на стенд заранее
+    командой docker pull — об этом сказано в самой практике.
+  * KUBERNETES. Бинарники: https://mirror.yandex.ru/mirrors/dl.k8s.io/
+    Репозиторий пакетов: https://mirror.yandex.ru/mirrors/pkgs.k8s.io/
+  * GITLAB. Репозиторий пакетов:
+    https://mirror.yandex.ru/mirrors/packages.gitlab.com/
+  * TERRAFORM, VAULT, CONSUL:
+    https://mirror.yandex.ru/mirrors/releases.hashicorp.com/
+  * КОЛЛЕКЦИИ ANSIBLE:
+    https://mirror.yandex.ru/mirrors/ansible-galaxy/
+
+ЗАЧЕМ ЭТО В КУРСЕ ПРО МОНИТОРИНГ: потому что мониторинг никогда
+не стоит в одиночку. Он разворачивается рядом с контейнерами,
+системой контроля версий и системой управления конфигурацией,
+и на том же стенде, где недоступен grafana.com, часто недоступно
+и что-то ещё. Умение заменить адрес, не меняя существа дела, —
+это рабочий навык, а не обходной путь.
+
+
+ЧАСТЬ 7. СВОДНАЯ ТАБЛИЦА: ОТКУДА ЧТО БРАТЬ
+=========================================================================
+
+  Компонент              Откуда в России
+  ---------------------  --------------------------------------------
+  Prometheus             GitHub Releases
+  promtool               в поставке Prometheus
+  Alertmanager           GitHub Releases
+  amtool                 в поставке Alertmanager
+  node_exporter          GitHub Releases
+  blackbox_exporter      GitHub Releases
+  Pushgateway            GitHub Releases
+  windows_exporter       GitHub Releases (.msi)
+  Grafana OSS            зеркало Яндекса,
+                         /mirrors/packages.grafana.com/oss/deb
+  Docker Engine          репозиторий Ubuntu или
+                         /mirrors/download.docker.com/
+  Образы контейнеров     локальный реестр организации либо
+                         предварительный docker pull
+  Kubernetes             /mirrors/dl.k8s.io/, /mirrors/pkgs.k8s.io/
+  PostgreSQL             репозиторий Ubuntu либо /mirrors/postgresql/
+  nginx                  репозиторий Ubuntu
+  Python и pip-пакеты    репозиторий Ubuntu;
+                         для prometheus_client — venv + доступный
+                         зеркальный индекс PyPI
+
+
+ЧАСТЬ 8. КАК ПРОВЕРИТЬ, ЧТО ВЫ ВЗЯЛИ ИМЕННО ТО
+=========================================================================
+
+Для архивов с GitHub:
+
+    sha256sum -c --ignore-missing sha256sums.txt
+
+Для пакета .deb из зеркала:
+
+    dpkg-deb -I grafana_12.0.10_21942624936_linux_amd64.deb | head -20
+
+В выводе будут Package, Version, Architecture и Maintainer —
+у официального пакета сопровождающий указан как Grafana Labs.
+
+Для репозитория apt:
+
+    apt-cache policy grafana
+
+В выводе видно, из какого адреса apt берёт пакет. Если там
+mirror.yandex.ru — значит, репозиторий подключён верно.
+
+ЕСЛИ СОМНЕНИЯ ОСТАЛИСЬ
+=========================================================================
+
+Три вопроса, на которые нужно ответить, прежде чем ставить пакет
+из незнакомого места:
+
+  1. Кто собрал этот пакет и можно ли это проверить подписью?
+  2. Совпадает ли имя файла с официальным до последнего символа?
+  3. Что этот пакет получит доступ к вашей инфраструктуре после
+     установки?
+
+Если хотя бы на один вопрос ответа нет — пакет не ставится.
+Это правило действует и для Grafana, и для любого другого
+компонента мониторинга.

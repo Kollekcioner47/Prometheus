@@ -1,0 +1,27 @@
+# Правило загрузки дашбордов Grafana — как код.
+#
+# Файл кладётся в /etc/grafana/provisioning/dashboards/lab.yml
+# Сами дашборды (JSON) лежат в каталоге, указанном в options.path:
+# в курсе это /var/lib/grafana/dashboards.
+
+apiVersion: 1
+
+providers:
+  - name: 'lab'
+    orgId: 1
+    folder: 'Лаборатория'
+    type: file
+    # disableDeletion: false — при удалении JSON-файла дашборд
+    # исчезает из Grafana. Так файл остаётся единственным
+    # источником правды.
+    disableDeletion: false
+    # updateIntervalSeconds: Grafana перечитывает каталог каждые
+    # 30 секунд, перезапускать службу после правки файла не нужно.
+    updateIntervalSeconds: 30
+    # allowUiUpdates: false — дашборд нельзя править в браузере.
+    # Если править и в файле, и в интерфейсе, через сутки уже
+    # неясно, какая версия настоящая.
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards
+      foldersFromFilesStructure: false
