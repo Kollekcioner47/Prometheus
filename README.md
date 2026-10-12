@@ -1,4 +1,5 @@
 # Мониторинг на Prometheus и Grafana
+<img width="1536" height="1024" alt="image" src="https://github.com/user-attachments/assets/7afdd3cd-6920-40f7-8eb0-58684badcc1e" />
 
 > Один курс — два трека: 3 дня (24 ак.ч.) и 5 дней (40 ак.ч.).
 > Основной акцент — на Prometheus.
